@@ -1,21 +1,23 @@
 import {
   type AuthHeaderVerificationResult,
-  verifyAuthHeaderAndReturnScope,
+  ApiAuthService,
 } from "@/src/features/public-api/server/apiAuth";
 import { cors, runMiddleware } from "@/src/features/public-api/server/cors";
 import { prisma } from "@langfuse/shared/src/db";
 import { type NextApiRequest, type NextApiResponse } from "next";
 import { z } from "zod";
 import {
-  type ingestionApiSchema,
-  eventTypes,
-  ingestionEvent,
   type TraceUpsertEventType,
   type EventBodyType,
   EventName,
   LangfuseNotFoundError,
   InternalServerError,
 } from "@langfuse/shared";
+import {
+  type ingestionApiSchema,
+  eventTypes,
+  ingestionEvent,
+} from "@langfuse/shared/src/server";
 import { type ApiAccessScope } from "@/src/features/public-api/server/types";
 import { persistEventMiddleware } from "@/src/server/api/services/event-service";
 import { backOff } from "exponential-backoff";
@@ -40,7 +42,10 @@ import {
   ForbiddenError,
   UnauthorizedError,
 } from "@langfuse/shared";
+import { redis } from "@langfuse/shared/src/server";
+
 import { isSigtermReceived } from "@/src/utils/shutdown";
+import { WorkerClient } from "@/src/server/api/services/WorkerClient";
 
 export const config = {
   api: {
@@ -66,9 +71,10 @@ export default async function handler(
     if (req.method !== "POST") throw new MethodNotAllowedError();
 
     // CHECK AUTH FOR ALL EVENTS
-    const authCheck = await verifyAuthHeaderAndReturnScope(
-      req.headers.authorization,
-    );
+    const authCheck = await new ApiAuthService(
+      prisma,
+      redis,
+    ).verifyAuthHeaderAndReturnScope(req.headers.authorization);
 
     if (!authCheck.validKey) throw new UnauthorizedError(authCheck.error);
 
@@ -139,9 +145,8 @@ export default async function handler(
       res,
     );
   } catch (error: unknown) {
-    console.error("error_handling_ingestion_event", error);
-
     if (!(error instanceof UnauthorizedError)) {
+      console.error("error_handling_ingestion_event", error);
       Sentry.captureException(error);
     }
 
@@ -239,8 +244,22 @@ export const handleBatch = async (
       console.error("Error handling event:", error);
       // Decide how to handle the error: rethrow, continue, or push an error object to results
       // For example, push an error object:
-      errors.push({ error: error, id: singleEvent.id, type: singleEvent.type });
+      errors.push({
+        error: error,
+        id: singleEvent.id,
+        type: singleEvent.type,
+      });
     }
+  }
+
+  if (env.CLICKHOUSE_URL) {
+    await new WorkerClient()
+      .sendIngestionBatch({
+        batch: events,
+        metadata,
+        projectId: authCheck.scope.projectId,
+      })
+      .catch(); // Ignore errors while testing the ingestion via worker
   }
 
   return { results, errors };
@@ -509,24 +528,25 @@ export const sendToWorkerIfEnvironmentConfigured = async (
   batchResults: BatchResult[],
   projectId: string,
 ): Promise<void> => {
+  const traceEvents: TraceUpsertEventType[] = batchResults
+    .filter((result) => result.type === eventTypes.TRACE_CREATE) // we only have create, no update.
+    .map((result) =>
+      result.result &&
+      typeof result.result === "object" &&
+      "id" in result.result
+        ? // ingestion API only gets traces for one projectId
+          { traceId: result.result.id as string, projectId }
+        : null,
+    )
+    .filter(isNotNullOrUndefined);
+
   try {
     if (
       env.LANGFUSE_WORKER_HOST &&
       env.LANGFUSE_WORKER_PASSWORD &&
       env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION
     ) {
-      const traceEvents: TraceUpsertEventType[] = batchResults
-        .filter((result) => result.type === eventTypes.TRACE_CREATE) // we only have create, no update.
-        .map((result) =>
-          result.result &&
-          typeof result.result === "object" &&
-          "id" in result.result
-            ? // ingestion API only gets traces for one projectId
-              { traceId: result.result.id as string, projectId }
-            : null,
-        )
-        .filter(isNotNullOrUndefined);
-
+      console.log(`Sending ${traceEvents.length} events to worker via HTTP`);
       const body: EventBodyType = {
         name: EventName.TraceUpsert,
         payload: traceEvents,

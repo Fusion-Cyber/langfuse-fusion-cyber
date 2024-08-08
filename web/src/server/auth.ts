@@ -27,7 +27,7 @@ import { getCookieName, getCookieOptions } from "./utils/cookies";
 import {
   getSsoAuthProviderIdForDomain,
   loadSsoProviders,
-} from "@langfuse/ee/sso";
+} from "@/src/ee/features/multi-tenant-sso/utils";
 import { z } from "zod";
 import * as Sentry from "@sentry/nextjs";
 import {
@@ -38,8 +38,6 @@ import {
 export const cloudConfigSchema = z.object({
   plan: z.enum(["Hobby", "Pro", "Team", "Enterprise"]).optional(),
   monthlyObservationLimit: z.number().int().positive().optional(),
-  // used for table and dashboard queries
-  defaultLookBackDays: z.number().int().positive().optional(),
 });
 
 const staticProviders: Provider[] = [
@@ -286,6 +284,7 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
   const data: NextAuthOptions = {
     session: {
       strategy: "jwt",
+      maxAge: env.AUTH_SESSION_MAX_AGE * 60, // convert minutes to seconds, default is set in env.mjs
     },
     callbacks: {
       async session({ session, token }): Promise<Session> {
@@ -317,8 +316,6 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
               env.LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES === "true",
             disableExpensivePostgresQueries:
               env.LANGFUSE_DISABLE_EXPENSIVE_POSTGRES_QUERIES === "true",
-            defaultTableDateTimeOffset:
-              env.LANGFUSE_DEFAULT_TABLE_DATETIME_OFFSET,
             // Enables features that are only available under an enterprise license when self-hosting Langfuse
             // If you edit this line, you risk executing code that is not MIT licensed (self-contained in /ee folders otherwise)
             eeEnabled: env.LANGFUSE_EE_LICENSE_KEY !== undefined,
@@ -333,18 +330,19 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
                   image: dbUser.image,
                   admin: dbUser.admin,
                   emailVerified: dbUser.emailVerified?.toISOString(),
-                  projects: dbUser.projectMemberships.map((membership) => ({
-                    id: membership.project.id,
-                    name: membership.project.name,
-                    role: membership.role,
-                    cloudConfig: {
-                      defaultLookBackDays:
-                        cloudConfigSchema
-                          .nullish()
-                          .parse(membership.project.cloudConfig)
-                          ?.defaultLookBackDays ?? null,
-                    },
-                  })),
+                  projects: dbUser.projectMemberships.map((membership) => {
+                    const cloudConfig = cloudConfigSchema.safeParse(
+                      membership.project.cloudConfig,
+                    );
+                    return {
+                      id: membership.project.id,
+                      name: membership.project.name,
+                      role: membership.role,
+                      cloudConfig: cloudConfig.success
+                        ? cloudConfig.data
+                        : null,
+                    };
+                  }),
                   featureFlags: parseFlags(dbUser.featureFlags),
                 }
               : null,
@@ -354,9 +352,11 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
         // Block sign in without valid user.email
         const email = user.email?.toLowerCase();
         if (!email) {
+          console.error("No email found in user object");
           throw new Error("No email found in user object");
         }
         if (z.string().email().safeParse(email).success === false) {
+          console.error("Invalid email found in user object");
           throw new Error("Invalid email found in user object");
         }
 
@@ -365,6 +365,9 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
         const domain = email.split("@")[1];
         const customSsoProvider = await getSsoAuthProviderIdForDomain(domain);
         if (customSsoProvider && account?.provider !== customSsoProvider) {
+          console.log(
+            "Custom SSO provider enforced for domain, user signed in with other provider",
+          );
           throw new Error(`You must sign in via SSO for this domain.`);
         }
 
@@ -484,7 +487,14 @@ export const getServerAuthSession = async (ctx: {
   const authOptions = await getAuthOptions();
   // https://github.com/nextauthjs/next-auth/issues/2408#issuecomment-1382629234
   // for api routes, we need to call the headers in the api route itself
-  // disable caching for anything auth related
-  ctx.res.setHeader("Cache-Control", "no-store, max-age=0");
+
+  // disable caching for any api requiring server-side auth
+  ctx.res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  ctx.res.setHeader("Pragma", "no-cache");
+  ctx.res.setHeader("Expires", "0");
+
   return getServerSession(ctx.req, ctx.res, authOptions);
 };

@@ -13,8 +13,9 @@ import { api } from "@/src/utils/api";
 import { usdFormatter } from "@/src/utils/numbers";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { AnnotateDrawer } from "@/src/features/manual-scoring/components/AnnotateDrawer";
+import { AnnotateDrawer } from "@/src/features/scores/components/AnnotateDrawer";
 import { Button } from "@/src/components/ui/button";
+import useLocalStorage from "@/src/components/useLocalStorage";
 
 // some projects have thousands of traces in a sessions, paginate to avoid rendering all at once
 const PAGE_SIZE = 50;
@@ -46,6 +47,10 @@ export const SessionPage: React.FC<{
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.isSuccess, session.data]);
+
+  const [emptySelectedConfigIds, setEmptySelectedConfigIds] = useLocalStorage<
+    string[]
+  >("emptySelectedConfigIds", []);
 
   if (session.error?.data?.code === "UNAUTHORIZED")
     return <ErrorPage message="You do not have access to this session." />;
@@ -129,6 +134,8 @@ export const SessionPage: React.FC<{
                 projectId={projectId}
                 traceId={trace.id}
                 scores={trace.scores}
+                emptySelectedConfigIds={emptySelectedConfigIds}
+                setEmptySelectedConfigIds={setEmptySelectedConfigIds}
                 variant="badge"
                 type="session"
                 source="SessionDetail"

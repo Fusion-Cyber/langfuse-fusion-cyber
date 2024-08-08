@@ -10,9 +10,9 @@ export * from "./orderByToPrisma";
 export * from "./tracesTable";
 export * from "./server/auth";
 export * from "./observationsTable";
-export * from "./features/ingestion/types";
 export * from "./utils/zod";
 export * from "./utils/json";
+export * from "./utils/objects";
 export { env } from "./env";
 
 // llm api

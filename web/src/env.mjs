@@ -29,16 +29,6 @@ export const env = createEnv({
     LANGFUSE_NEW_USER_SIGNUP_WEBHOOK: z.string().url().optional(),
     // Add `.min(1) on ID and SECRET if you want to make sure they're not empty
     LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: z.enum(["true", "false"]).optional(),
-    LANGFUSE_DEFAULT_TABLE_DATETIME_OFFSET: z
-      .string()
-      .optional()
-      .refine((v) => v === undefined || !isNaN(Number.parseInt(v)), {
-        message:
-          "LANGFUSE_DEFAULT_TABLE_DATETIME_OFFSET must be a number when set",
-      })
-      .transform(
-        (v) => (v === undefined ? undefined : -Number.parseInt(v)), // negative offset
-      ),
     LANGFUSE_DISABLE_EXPENSIVE_POSTGRES_QUERIES: z
       .enum(["true", "false"])
       .optional()
@@ -87,6 +77,7 @@ export const env = createEnv({
     AUTH_DOMAINS_WITH_SSO_ENFORCEMENT: z.string().optional(),
     AUTH_DISABLE_USERNAME_PASSWORD: z.enum(["true", "false"]).optional(),
     AUTH_DISABLE_SIGNUP: z.enum(["true", "false"]).optional(),
+    AUTH_SESSION_MAX_AGE: z.coerce.number().int().gt(5, "AUTH_SESSION_MAX_AGE must be > 5 as session JWT tokens are refreshed every 5 minutes").optional().default(30 * 24 * 60), // default to 30 days
     // EMAIL
     EMAIL_FROM_ADDRESS: z
       .string()
@@ -110,8 +101,35 @@ export const env = createEnv({
     TURNSTILE_SECRET_KEY: z.string().optional(),
     // DB event log
     ENABLE_EVENT_LOG: z.enum(["true", "false"]).optional().default("true"),
+    // clickhouse
+    CLICKHOUSE_URL: z.string().optional(),
+    CLICKHOUSE_USER: z.string().optional(),
+    CLICKHOUSE_PASSWORD: z.string().optional(),
     // EE License
     LANGFUSE_EE_LICENSE_KEY: z.string().optional(),
+    ADMIN_API_KEY: z.string().optional(),
+    ENCRYPTION_KEY: z
+      .string()
+      .length(
+        64,
+        "ENCRYPTION_KEY must be 256 bits, 64 string characters in hex format, generate via: openssl rand -hex 32",
+      )
+      .optional(),
+    REDIS_HOST: z.string().nullish(),
+    REDIS_PORT: z.coerce
+      .number({
+        description:
+          ".env files convert numbers to strings, therefoore we have to enforce them to be numbers",
+      })
+      .positive()
+      .max(65536, `options.port should be >= 0 and < 65536`)
+      .default(6379)
+      .nullable(),
+    REDIS_AUTH: z.string().nullish(),
+    REDIS_CONNECTION_STRING: z.string().nullish(),
+    // langfuse caching
+    LANGFUSE_CACHE_API_KEY_ENABLED: z.enum(["true", "false"]).default("false"),
+    LANGFUSE_CACHE_API_KEY_TTL_SECONDS: z.coerce.number().default(120),
   },
 
   /**
@@ -151,8 +169,6 @@ export const env = createEnv({
     NEXT_PUBLIC_SIGN_UP_DISABLED: process.env.NEXT_PUBLIC_SIGN_UP_DISABLED,
     LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:
       process.env.LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES,
-    LANGFUSE_DEFAULT_TABLE_DATETIME_OFFSET:
-      process.env.LANGFUSE_DEFAULT_TABLE_DATETIME_OFFSET,
     LANGFUSE_DISABLE_EXPENSIVE_POSTGRES_QUERIES:
       process.env.LANGFUSE_DISABLE_EXPENSIVE_POSTGRES_QUERIES,
     LANGFUSE_TEAM_SLACK_WEBHOOK: process.env.LANGFUSE_TEAM_SLACK_WEBHOOK,
@@ -205,6 +221,7 @@ export const env = createEnv({
       process.env.AUTH_DOMAINS_WITH_SSO_ENFORCEMENT,
     AUTH_DISABLE_USERNAME_PASSWORD: process.env.AUTH_DISABLE_USERNAME_PASSWORD,
     AUTH_DISABLE_SIGNUP: process.env.AUTH_DISABLE_SIGNUP,
+    AUTH_SESSION_MAX_AGE: process.env.AUTH_SESSION_MAX_AGE,
     // Email
     EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,
     SMTP_CONNECTION_URL: process.env.SMTP_CONNECTION_URL,
@@ -227,8 +244,22 @@ export const env = createEnv({
     NEXT_PUBLIC_CRISP_WEBSITE_ID: process.env.NEXT_PUBLIC_CRISP_WEBSITE_ID,
     // db event log
     ENABLE_EVENT_LOG: process.env.ENABLE_EVENT_LOG,
+    // clickhouse
+    CLICKHOUSE_URL: process.env.CLICKHOUSE_URL,
+    CLICKHOUSE_USER: process.env.CLICKHOUSE_USER,
+    CLICKHOUSE_PASSWORD: process.env.CLICKHOUSE_PASSWORD,
     // EE License
     LANGFUSE_EE_LICENSE_KEY: process.env.LANGFUSE_EE_LICENSE_KEY,
+    ADMIN_API_KEY: process.env.ADMIN_API_KEY,
+    ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,
+    REDIS_HOST: process.env.REDIS_HOST,
+    REDIS_PORT: process.env.REDIS_PORT,
+    REDIS_AUTH: process.env.REDIS_AUTH,
+    REDIS_CONNECTION_STRING: process.env.REDIS_CONNECTION_STRING,
+    // langfuse caching
+    LANGFUSE_CACHE_API_KEY_ENABLED: process.env.LANGFUSE_CACHE_API_KEY_ENABLED,
+    LANGFUSE_CACHE_API_KEY_TTL_SECONDS:
+      process.env.LANGFUSE_CACHE_API_KEY_TTL_SECONDS,
   },
   // Skip validation in Docker builds
   // DOCKER_BUILD is set in Dockerfile

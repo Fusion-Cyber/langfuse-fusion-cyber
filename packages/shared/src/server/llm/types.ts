@@ -45,8 +45,10 @@ export const ZodModelConfig = z.object({
   top_p: z.coerce.number().optional(),
 });
 
+// NOTE: Update docs page when changing this!
 export const openAIModels = [
   "gpt-4o",
+  "gpt-4o-2024-08-06",
   "gpt-4o-2024-05-13",
   "gpt-4o-mini",
   "gpt-4o-mini-2024-07-18",
@@ -66,6 +68,7 @@ export const openAIModels = [
 
 export type OpenAIModel = (typeof openAIModels)[number];
 
+// NOTE: Update docs page when changing this!
 export const anthropicModels = [
   "claude-3-5-sonnet-20240620",
   "claude-3-opus-20240229",
