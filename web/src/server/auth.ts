@@ -6,7 +6,7 @@ import {
   type Session,
 } from "next-auth";
 import { PrismaAdapter } from "@next-auth/prisma-adapter";
-import { prisma } from "@langfuse/shared/src/db";
+import { prisma, type Role } from "@langfuse/shared/src/db";
 import { verifyPassword } from "@/src/features/auth-credentials/lib/credentialsServerUtils";
 import { parseFlags } from "@/src/features/feature-flags/utils";
 import { env } from "@/src/env.mjs";
@@ -29,16 +29,29 @@ import {
   loadSsoProviders,
 } from "@/src/ee/features/multi-tenant-sso/utils";
 import { z } from "zod";
-import * as Sentry from "@sentry/nextjs";
+import { CloudConfigSchema } from "@langfuse/shared";
 import {
   CustomSSOProvider,
+  traceException,
   sendResetPasswordVerificationRequest,
 } from "@langfuse/shared/src/server";
+import { getOrganizationPlan } from "@/src/features/entitlements/server/getOrganizationPlan";
+import { projectRoleAccessRights } from "@/src/features/rbac/constants/projectAccessRights";
 
-export const cloudConfigSchema = z.object({
-  plan: z.enum(["Hobby", "Pro", "Team", "Enterprise"]).optional(),
-  monthlyObservationLimit: z.number().int().positive().optional(),
-});
+function canCreateOrganizations(userEmail: string | null): boolean {
+  // if no allowlist is set or no active EE key, allow all users to create organizations
+  if (
+    !env.LANGFUSE_ALLOWED_ORGANIZATION_CREATORS ||
+    !env.LANGFUSE_EE_LICENSE_KEY
+  )
+    return true;
+
+  if (!userEmail) return false;
+
+  const allowedOrgCreators =
+    env.LANGFUSE_ALLOWED_ORGANIZATION_CREATORS.toLowerCase().split(",");
+  return allowedOrgCreators.includes(userEmail.toLowerCase());
+}
 
 const staticProviders: Provider[] = [
   CredentialsProvider({
@@ -120,7 +133,8 @@ const staticProviders: Provider[] = [
         image: dbUser.image,
         emailVerified: dbUser.emailVerified?.toISOString(),
         featureFlags: parseFlags(dbUser.featureFlags),
-        projects: [],
+        canCreateOrganizations: canCreateOrganizations(dbUser.email),
+        organizations: [],
       };
 
       return userObj;
@@ -277,7 +291,7 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
     dynamicSsoProviders = await loadSsoProviders();
   } catch (e) {
     console.error("Error loading dynamic SSO providers", e);
-    Sentry.captureException(e);
+    traceException(e);
   }
   const providers = [...staticProviders, ...dynamicSsoProviders];
 
@@ -301,9 +315,18 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
             emailVerified: true,
             featureFlags: true,
             admin: true,
-            projectMemberships: {
+            organizationMemberships: {
               include: {
-                project: true,
+                organization: {
+                  include: {
+                    projects: true,
+                  },
+                },
+                ProjectMemberships: {
+                  include: {
+                    project: true,
+                  },
+                },
               },
             },
           },
@@ -329,20 +352,44 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
                   email: dbUser.email,
                   image: dbUser.image,
                   admin: dbUser.admin,
+                  canCreateOrganizations: canCreateOrganizations(dbUser.email),
+                  organizations: dbUser.organizationMemberships.map(
+                    (orgMembership) => {
+                      const parsedCloudConfig = CloudConfigSchema.safeParse(
+                        orgMembership.organization.cloudConfig,
+                      );
+                      return {
+                        id: orgMembership.organization.id,
+                        name: orgMembership.organization.name,
+                        role: orgMembership.role,
+                        cloudConfig: parsedCloudConfig.data,
+                        projects: orgMembership.organization.projects
+                          .map((project) => {
+                            const projectRole: Role =
+                              orgMembership.ProjectMemberships.find(
+                                (membership) =>
+                                  membership.projectId === project.id,
+                              )?.role ?? orgMembership.role;
+                            return {
+                              id: project.id,
+                              name: project.name,
+                              role: projectRole,
+                            };
+                          })
+                          // Only include projects where the user has the required role
+                          .filter((project) =>
+                            projectRoleAccessRights[project.role].includes(
+                              "project:read",
+                            ),
+                          ),
+
+                        // Enables features/entitlements based on the plan of the organization, either cloud or EE version when self-hosting
+                        // If you edit this line, you risk executing code that is not MIT licensed (contained in /ee folders, see LICENSE)
+                        plan: getOrganizationPlan(parsedCloudConfig.data),
+                      };
+                    },
+                  ),
                   emailVerified: dbUser.emailVerified?.toISOString(),
-                  projects: dbUser.projectMemberships.map((membership) => {
-                    const cloudConfig = cloudConfigSchema.safeParse(
-                      membership.project.cloudConfig,
-                    );
-                    return {
-                      id: membership.project.id,
-                      name: membership.project.name,
-                      role: membership.role,
-                      cloudConfig: cloudConfig.success
-                        ? cloudConfig.data
-                        : null,
-                    };
-                  }),
                   featureFlags: parseFlags(dbUser.featureFlags),
                 }
               : null,
@@ -398,10 +445,11 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
             env.AUTH_GOOGLE_ALLOWED_DOMAINS?.split(",").map((domain) =>
               domain.trim().toLowerCase(),
             ) ?? [];
+          
           if (allowedDomains.length > 0) {
             return await Promise.resolve(
               allowedDomains.includes(
-                (profile as GoogleProfile).hd.toLowerCase(),
+                (profile as GoogleProfile).hd?.toLowerCase(),
               ),
             );
           }

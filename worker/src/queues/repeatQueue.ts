@@ -1,8 +1,12 @@
 import { Queue, Worker } from "bullmq";
 
-import { redis } from "@langfuse/shared/src/server";
+import {
+  redis,
+  QueueJobs,
+  QueueName,
+  createNewRedisInstance,
+} from "@langfuse/shared/src/server";
 import { enqueueBatchExportJobs } from "../features/batchExport/enqueueBatchExportJobs";
-import { QueueJobs, QueueName } from "@langfuse/shared";
 
 export const repeatQueue = redis
   ? new Queue(QueueName.RepeatQueue, {
@@ -21,8 +25,10 @@ if (repeatQueue) {
   );
 }
 
-export const repeatQueueExecutor = redis
-  ? new Worker(
+const createRepeatQueueExecutor = () => {
+  const redisInstance = createNewRedisInstance();
+  if (redisInstance) {
+    return new Worker(
       QueueName.RepeatQueue,
       async (job) => {
         if (job.name === QueueJobs.EnqueueBatchExportJobs) {
@@ -30,7 +36,11 @@ export const repeatQueueExecutor = redis
         }
       },
       {
-        connection: redis,
+        connection: redisInstance,
       }
-    )
-  : null;
+    );
+  }
+  return null;
+};
+
+export const repeatQueueExecutor = createRepeatQueueExecutor();

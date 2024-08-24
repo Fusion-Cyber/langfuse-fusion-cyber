@@ -2,15 +2,13 @@ import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { v4 } from "uuid";
 
-import { Model, PrismaClient, Prompt, QueueJobs } from "@langfuse/shared";
+import { Model, PrismaClient, Prompt } from "@langfuse/shared";
 import {
   convertObservationReadToInsert,
   convertScoreReadToInsert,
   convertTraceReadToInsert,
   eventTypes,
   findModel,
-  IngestionBatchEventType,
-  IngestionEventType,
   ingestionEventWithProjectId,
   IngestionEventWithProjectIdType,
   ObservationEvent,
@@ -26,21 +24,17 @@ import {
   TraceRecordInsertType,
   traceRecordReadSchema,
   ClickhouseClientType,
+  validateAndInflateScore,
+  IngestionUtils,
+  ClickhouseEntityType,
+  PromptService,
 } from "@langfuse/shared/src/server";
 
 import { tokenCount } from "../../features/tokenisation/usage";
-import { instrumentAsync } from "../../instrumentation";
+import { instrument } from "@langfuse/shared/src/server";
 import logger from "../../logger";
-import { IngestionFlushQueue } from "../../queues/ingestionFlushQueue";
 import { ClickhouseWriter, TableName } from "../ClickhouseWriter";
 import { convertJsonSchemaToRecord, overwriteObject } from "./utils";
-
-enum EntityType {
-  Trace = "trace",
-  Score = "score",
-  Observation = "observation",
-  SDK_LOG = "sdk-log",
-}
 
 type InsertRecord =
   | TraceRecordInsertType
@@ -69,54 +63,20 @@ const immutableEntityKeys: {
   ],
 };
 
-const reservedCharsEscapeMap = [
-  { reserved: ":", escape: "|%|" },
-  { reserved: "_", escape: "|#|" },
-];
-
 export class IngestionService {
+  private promptService: PromptService;
+
   constructor(
     private redis: Redis,
-    private prisma: PrismaClient,
-    private ingestionFlushQueue: IngestionFlushQueue,
+    prisma: PrismaClient,
     private clickHouseWriter: ClickhouseWriter,
-    private clickhouseClient: ClickhouseClientType,
-    private bufferTtlSeconds: number
-  ) {}
-
-  public async addBatch(
-    events: IngestionBatchEventType,
-    projectId: string
-  ): Promise<void> {
-    const ingestedEvents = events.map(async (event) => {
-      if (!("id" in event.body && event.body.id)) {
-        logger.warn(
-          `Received ingestion event without id, ${JSON.stringify(event)}`
-        );
-
-        return null;
-      }
-
-      const projectEntityKey = this.getProjectEntityKey({
-        entityId: event.body.id,
-        eventType: this.getEventType(event),
-        projectId,
-      });
-      const bufferKey = this.getBufferKey(projectEntityKey);
-      const serializedEventData = JSON.stringify({ ...event, projectId });
-
-      await this.redis.lpush(bufferKey, serializedEventData);
-      await this.redis.expire(bufferKey, this.bufferTtlSeconds);
-      await this.ingestionFlushQueue.add(QueueJobs.FlushIngestionEntity, null, {
-        jobId: projectEntityKey,
-      });
-    });
-
-    await Promise.all(ingestedEvents);
+    private clickhouseClient: ClickhouseClientType
+  ) {
+    this.promptService = new PromptService(prisma, redis);
   }
 
-  public async flush(projectEntityKey: string): Promise<void> {
-    const bufferKey = this.getBufferKey(projectEntityKey);
+  public async flush(flushKey: string): Promise<void> {
+    const bufferKey = IngestionUtils.getBufferKey(flushKey);
     const eventList = (await this.redis.lrange(bufferKey, 0, -1))
       .map((serializedEventData) => {
         const parsed = ingestionEventWithProjectId.safeParse(
@@ -137,99 +97,34 @@ export class IngestionService {
 
     if (eventList.length === 0) {
       throw new Error(
-        `No valid events found in buffer for project entity ${projectEntityKey}`
+        `No valid events found in buffer for flushKey ${flushKey}`
       );
     }
 
     const { projectId, eventType, entityId } =
-      this.parseProjectEntityKey(projectEntityKey);
+      IngestionUtils.parseFlushKey(flushKey);
 
     switch (eventType) {
-      case EntityType.Trace:
+      case ClickhouseEntityType.Trace:
         return await this.processTraceEventList({
           projectId,
           entityId,
           traceEventList: eventList as TraceEventType[],
         });
-      case EntityType.Observation:
+      case ClickhouseEntityType.Observation:
         return await this.processObservationEventList({
           projectId,
           entityId,
           observationEventList: eventList as ObservationEvent[],
         });
-      case EntityType.Score: {
-        return; // TODO: refactor score validations and enable processing again
-        // return await this.processScoreEventList({
-        //   projectId,
-        //   entityId,
-        //   scoreEventList: eventList as ScoreEventType[],
-        // });
+      case ClickhouseEntityType.Score: {
+        return await this.processScoreEventList({
+          projectId,
+          entityId,
+          scoreEventList: eventList as ScoreEventType[],
+        });
       }
     }
-  }
-
-  private getEventType(event: IngestionEventType): EntityType {
-    switch (event.type) {
-      case eventTypes.TRACE_CREATE:
-        return EntityType.Trace;
-      case eventTypes.OBSERVATION_CREATE:
-      case eventTypes.OBSERVATION_UPDATE:
-      case eventTypes.EVENT_CREATE:
-      case eventTypes.SPAN_CREATE:
-      case eventTypes.SPAN_UPDATE:
-      case eventTypes.GENERATION_CREATE:
-      case eventTypes.GENERATION_UPDATE:
-        return EntityType.Observation;
-      case eventTypes.SCORE_CREATE:
-        return EntityType.Score;
-      case eventTypes.SDK_LOG:
-        return EntityType.SDK_LOG;
-    }
-  }
-
-  private getProjectEntityKey(params: {
-    projectId: string;
-    eventType: EntityType;
-    entityId: string;
-  }): string {
-    const sanitizedEntityId = IngestionService.escapeReservedChars(
-      params.entityId
-    );
-
-    return `${params.projectId}_${params.eventType}_${sanitizedEntityId}`;
-  }
-
-  private parseProjectEntityKey(projectEntityKey: string) {
-    const split = projectEntityKey.split("_");
-
-    if (split.length !== 3) {
-      throw new Error(
-        `Invalid project entity key format ${projectEntityKey}, expected 3 parts`
-      );
-    }
-
-    const [projectId, eventType, escapedEntityId] = split;
-    const entityId = IngestionService.unescapeReservedChars(escapedEntityId);
-
-    return { projectId, eventType, entityId };
-  }
-
-  private getBufferKey(projectEntityKey: string): string {
-    return "ingestionBuffer:" + projectEntityKey;
-  }
-
-  private static escapeReservedChars(string: string): string {
-    return reservedCharsEscapeMap.reduce(
-      (acc, { reserved, escape }) => acc.replaceAll(reserved, escape),
-      string
-    );
-  }
-
-  private static unescapeReservedChars(escapedString: string): string {
-    return reservedCharsEscapeMap.reduce(
-      (acc, { reserved, escape }) => acc.replaceAll(escape, reserved),
-      escapedString
-    );
   }
 
   private async processScoreEventList(params: {
@@ -243,26 +138,48 @@ export class IngestionService {
     const timeSortedEvents =
       IngestionService.toTimeSortedEventList(scoreEventList);
 
-    const scoreRecords: ScoreRecordInsertType[] = timeSortedEvents.map(
-      (score) => ({
-        id: entityId,
-        project_id: projectId,
-        timestamp: this.getMillisecondTimestamp(score.timestamp),
-        name: score.body.name,
-        value: score.body.value,
-        source: "API",
-        trace_id: score.body.traceId,
-        data_type: score.body.dataType,
-        observation_id: score.body.observationId ?? null,
-        created_at: Date.now(),
-        updated_at: Date.now(),
-      })
-    );
+    const scoreRecordPromises: Promise<ScoreRecordInsertType>[] =
+      timeSortedEvents.map(async (scoreEvent) => {
+        const validatedScore = await validateAndInflateScore({
+          body: scoreEvent.body,
+          scoreId: entityId,
+          projectId,
+        });
+
+        return {
+          id: entityId,
+          project_id: projectId,
+          timestamp: this.getMillisecondTimestamp(scoreEvent.timestamp),
+          name: validatedScore.name,
+          value: validatedScore.value,
+          source: validatedScore.source,
+          trace_id: validatedScore.traceId,
+          data_type: validatedScore.dataType,
+          observation_id: validatedScore.observationId,
+          comment: validatedScore.comment,
+          string_value: validatedScore.stringValue,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        };
+      });
+
+    const scoreRecords = await Promise.all(scoreRecordPromises);
+
+    const clickhouseScoreRecord = await this.getClickhouseRecord({
+      projectId,
+      entityId,
+      table: TableName.Scores,
+    });
+
+    if (!clickhouseScoreRecord && !this.hasCreateEvent(scoreEventList)) {
+      throw new Error(
+        `No create event or existing record found for score with id ${entityId} in project ${projectId}`
+      );
+    }
 
     const finalScoreRecord: ScoreRecordInsertType =
       await this.mergeScoreRecords({
-        projectId,
-        entityId,
+        clickhouseScoreRecord,
         scoreRecords,
       });
 
@@ -286,9 +203,20 @@ export class IngestionService {
       traceEventList: timeSortedEvents,
     });
 
-    const finalTraceRecord = await this.mergeTraceRecords({
+    const clickhouseTraceRecord = await this.getClickhouseRecord({
       projectId,
       entityId,
+      table: TableName.Traces,
+    });
+
+    if (!clickhouseTraceRecord && !this.hasCreateEvent(traceEventList)) {
+      throw new Error(
+        `No create event or existing record found for trace with id ${entityId} in project ${projectId}`
+      );
+    }
+
+    const finalTraceRecord = await this.mergeTraceRecords({
+      clickhouseTraceRecord,
       traceRecords,
     });
 
@@ -314,10 +242,25 @@ export class IngestionService {
       prompt,
     });
 
-    const finalObservationRecord = await this.mergeObservationRecords({
+    const clickhouseObservationRecord = await this.getClickhouseRecord({
       projectId,
       entityId,
+      table: TableName.Observations,
+    });
+
+    if (
+      !clickhouseObservationRecord &&
+      !this.hasCreateEvent(observationEventList)
+    ) {
+      throw new Error(
+        `No create event or existing record found for observation with id ${entityId} in project ${projectId}`
+      );
+    }
+
+    const finalObservationRecord = await this.mergeObservationRecords({
+      projectId,
       observationRecords,
+      clickhouseObservationRecord,
     });
 
     // Backward compat: create wrapper trace for SDK < 2.0.0 events that do not have a traceId
@@ -346,17 +289,10 @@ export class IngestionService {
   }
 
   private async mergeScoreRecords(params: {
-    projectId: string;
-    entityId: string;
     scoreRecords: ScoreRecordInsertType[];
+    clickhouseScoreRecord?: ScoreRecordInsertType | null;
   }): Promise<ScoreRecordInsertType> {
-    const { projectId, entityId, scoreRecords } = params;
-
-    const clickhouseScoreRecord = await this.getClickhouseRecord({
-      projectId,
-      entityId,
-      table: TableName.Scores,
-    });
+    const { scoreRecords, clickhouseScoreRecord } = params;
 
     const recordsToMerge = clickhouseScoreRecord
       ? [clickhouseScoreRecord, ...scoreRecords]
@@ -371,17 +307,10 @@ export class IngestionService {
   }
 
   private async mergeTraceRecords(params: {
-    projectId: string;
-    entityId: string;
     traceRecords: TraceRecordInsertType[];
+    clickhouseTraceRecord?: TraceRecordInsertType | null;
   }): Promise<TraceRecordInsertType> {
-    const { projectId, entityId, traceRecords } = params;
-
-    const clickhouseTraceRecord = await this.getClickhouseRecord({
-      projectId,
-      entityId,
-      table: TableName.Traces,
-    });
+    const { traceRecords, clickhouseTraceRecord } = params;
 
     const recordsToMerge = clickhouseTraceRecord
       ? [clickhouseTraceRecord, ...traceRecords]
@@ -397,19 +326,14 @@ export class IngestionService {
 
   private async mergeObservationRecords(params: {
     projectId: string;
-    entityId: string;
     observationRecords: ObservationRecordInsertType[];
+    clickhouseObservationRecord?: ObservationRecordInsertType | null;
   }): Promise<ObservationRecordInsertType> {
-    const { projectId, entityId, observationRecords } = params;
+    const { projectId, observationRecords, clickhouseObservationRecord } =
+      params;
 
-    const existingObservationRecord = await this.getClickhouseRecord({
-      projectId,
-      entityId,
-      table: TableName.Observations,
-    });
-
-    const recordsToMerge = existingObservationRecord
-      ? [existingObservationRecord, ...observationRecords]
+    const recordsToMerge = clickhouseObservationRecord
+      ? [clickhouseObservationRecord, ...observationRecords]
       : observationRecords;
 
     const mergedRecord = this.mergeRecords(
@@ -419,6 +343,14 @@ export class IngestionService {
 
     const parsedObservationRecord =
       observationRecordInsertSchema.parse(mergedRecord);
+
+    // Override endTimes that are before startTimes with the startTime
+    if (
+      parsedObservationRecord.end_time &&
+      parsedObservationRecord.end_time < parsedObservationRecord.start_time
+    ) {
+      parsedObservationRecord.end_time = parsedObservationRecord.start_time;
+    }
 
     const generationUsage = await this.getGenerationUsage({
       projectId,
@@ -475,20 +407,15 @@ export class IngestionService {
 
     if (!lastObservationWithPromptInfo) return null;
 
-    const dbPrompt = await this.prisma.prompt.findFirst({
-      where: {
-        projectId,
-        name: lastObservationWithPromptInfo.body.promptName,
-        version: lastObservationWithPromptInfo.body.promptVersion,
-      },
-      select: {
-        id: true,
-        name: true,
-        version: true,
-      },
-    });
+    const { promptName, promptVersion: version } =
+      lastObservationWithPromptInfo.body;
 
-    return dbPrompt;
+    return this.promptService.getPrompt({
+      projectId,
+      promptName,
+      version,
+      label: undefined,
+    });
   }
 
   private hasPromptInformation(
@@ -541,6 +468,7 @@ export class IngestionService {
       ...tokenCounts,
       ...tokenCosts,
       internal_model_id: internalModel?.id,
+      unit: observationRecord.unit ?? internalModel?.unit,
     };
   }
 
@@ -588,11 +516,7 @@ export class IngestionService {
 
   static calculateTokenCosts(
     model: Model | null | undefined,
-    userProvidedCosts: {
-      provided_input_cost?: number | null;
-      provided_output_cost?: number | null;
-      provided_total_cost?: number | null;
-    },
+    observationRecord: ObservationRecordInsertType,
     tokenCounts: {
       input_usage_units?: number | null;
       output_usage_units?: number | null;
@@ -603,20 +527,21 @@ export class IngestionService {
     output_cost: number | null | undefined;
     total_cost: number | null | undefined;
   } {
+    const { provided_input_cost, provided_output_cost, provided_total_cost } =
+      observationRecord;
+
     // If user has provided any cost point, do not calculate anything else
     if (
-      userProvidedCosts.provided_input_cost != null ||
-      userProvidedCosts.provided_output_cost != null ||
-      userProvidedCosts.provided_total_cost != null
+      provided_input_cost != null ||
+      provided_output_cost != null ||
+      provided_total_cost != null
     ) {
       return {
-        ...userProvidedCosts,
-        input_cost: userProvidedCosts.provided_input_cost,
-        output_cost: userProvidedCosts.provided_output_cost,
+        input_cost: provided_input_cost,
+        output_cost: provided_output_cost,
         total_cost:
-          userProvidedCosts.provided_total_cost ??
-          (userProvidedCosts.provided_input_cost ?? 0) +
-            (userProvidedCosts.provided_output_cost ?? 0),
+          provided_total_cost ??
+          (provided_input_cost ?? 0) + (provided_output_cost ?? 0),
       };
     }
 
@@ -673,7 +598,7 @@ export class IngestionService {
     };
     const { projectId, entityId, table } = params;
 
-    return await instrumentAsync({ name: `get-${table}` }, async () => {
+    return await instrument({ name: `get-${table}` }, async () => {
       const queryResult = await this.clickhouseClient.query({
         query: `SELECT * FROM ${table} WHERE project_id = '${projectId}' AND id = '${entityId}' ORDER BY updated_at DESC LIMIT 1`,
         format: "JSONEachRow",
@@ -847,6 +772,14 @@ export class IngestionService {
 
   private getMillisecondTimestamp(timestamp?: string | null): number {
     return timestamp ? new Date(timestamp).getTime() : Date.now();
+  }
+
+  private hasCreateEvent(
+    eventList: ObservationEvent[] | ScoreEventType[] | TraceEventType[]
+  ): boolean {
+    return eventList.some((event) =>
+      event.type.toLowerCase().includes("create")
+    );
   }
 }
 

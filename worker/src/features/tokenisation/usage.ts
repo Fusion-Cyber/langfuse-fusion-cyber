@@ -1,6 +1,6 @@
+import { Model, parseJsonPrioritised } from "@langfuse/shared";
 import { isChatModel, isTiktokenModel } from "./types";
 import { countTokens } from "@anthropic-ai/tokenizer";
-import { Model } from "@prisma/client";
 
 import {
   type TiktokenModel,
@@ -10,6 +10,7 @@ import {
 } from "tiktoken";
 
 import { z } from "zod";
+import { instrument } from "@langfuse/shared/src/server";
 
 const OpenAiTokenConfig = z.object({
   tokenizerModel: z.string().refine(isTiktokenModel, {
@@ -31,25 +32,35 @@ export function tokenCount(p: {
   model: Model;
   text: unknown;
 }): number | undefined {
-  if (
-    p.text === null ||
-    p.text === undefined ||
-    (Array.isArray(p.text) && p.text.length === 0)
-  ) {
-    return undefined;
-  }
+  return instrument(
+    {
+      name: "token-count",
+    },
+    () => {
+      if (
+        p.text === null ||
+        p.text === undefined ||
+        (Array.isArray(p.text) && p.text.length === 0)
+      ) {
+        return undefined;
+      }
 
-  if (p.model.tokenizerId === "openai") {
-    return openAiTokenCount({
-      model: p.model,
-      text: p.text,
-    });
-  } else if (p.model.tokenizerId === "claude") {
-    return claudeTokenCount(p.text);
-  } else {
-    console.error(`Unknown tokenizer ${p.model.tokenizerId}`);
-    return undefined;
-  }
+      if (p.model.tokenizerId === "openai") {
+        return openAiTokenCount({
+          model: p.model,
+          text: p.text,
+        });
+      } else if (p.model.tokenizerId === "claude") {
+        return claudeTokenCount(p.text);
+      } else {
+        if (p.model.tokenizerId) {
+          console.error(`Unknown tokenizer ${p.model.tokenizerId}`);
+        }
+
+        return undefined;
+      }
+    }
+  );
 }
 
 type ChatMessage = {
@@ -70,8 +81,13 @@ function openAiTokenCount(p: { model: Model; text: unknown }) {
   }
 
   let result = undefined;
+  const parsedText =
+    typeof p.text === "string" ? parseJsonPrioritised(p.text) : p.text; // Clickhouse stores ChatMessage array as string
 
-  if (isChatMessageArray(p.text) && isChatModel(config.data.tokenizerModel)) {
+  if (
+    isChatMessageArray(parsedText) &&
+    isChatModel(config.data.tokenizerModel)
+  ) {
     // check if the tokenizerConfig is a valid chat config
     const parsedConfig = OpenAiChatTokenConfig.safeParse(
       p.model.tokenizerConfig
@@ -85,13 +101,16 @@ function openAiTokenCount(p: { model: Model; text: unknown }) {
       return undefined;
     }
     result = openAiChatTokenCount({
-      messages: p.text,
+      messages: parsedText,
       config: parsedConfig.data,
     });
   } else {
-    result = isString(p.text)
-      ? getTokensByModel(config.data.tokenizerModel, p.text)
-      : getTokensByModel(config.data.tokenizerModel, JSON.stringify(p.text));
+    result = isString(parsedText)
+      ? getTokensByModel(config.data.tokenizerModel, parsedText)
+      : getTokensByModel(
+          config.data.tokenizerModel,
+          JSON.stringify(parsedText)
+        );
   }
   return result;
 }
@@ -162,6 +181,12 @@ interface Tokenizer {
   [model: string]: Tiktoken;
 }
 const cachedTokenizerByModel: Tokenizer = {};
+
+export function freeAllTokenizers() {
+  Object.values(cachedTokenizerByModel).forEach((tokenizer) => {
+    tokenizer.free();
+  });
+}
 
 function isString(value: unknown): value is string {
   return typeof value === "string";

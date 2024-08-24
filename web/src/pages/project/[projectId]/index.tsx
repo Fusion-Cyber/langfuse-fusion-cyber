@@ -23,20 +23,21 @@ import { useSession } from "next-auth/react";
 import { findClosestDashboardInterval } from "@/src/utils/date-range-utils";
 import { useDashboardDateRange } from "@/src/hooks/useDashboardDateRange";
 import { useDebounce } from "@/src/hooks/useDebounce";
+import { ScoreAnalytics } from "@/src/features/dashboard/components/score-analytics/ScoreAnalytics";
+import SetupTracingButton from "@/src/features/setup/components/SetupTracingButton";
+import { useUiCustomization } from "@/src/ee/features/ui-customization/useUiCustomization";
 
-export default function Start() {
+export default function Dashboard() {
   const router = useRouter();
   const projectId = router.query.projectId as string;
   const { selectedOption, dateRange, setDateRangeAndOption } =
     useDashboardDateRange();
 
+  const uiCustomization = useUiCustomization();
+
   const session = useSession();
   const disableExpensiveDashboardComponents =
     session.data?.environment.disableExpensivePostgresQueries ?? true;
-
-  const project = session.data?.user?.projects.find(
-    (project) => project.id === projectId,
-  );
 
   const traceFilterOptions = api.traces.filterOptions.useQuery(
     {
@@ -135,7 +136,7 @@ export default function Start() {
 
   return (
     <div className="md:container">
-      <Header title={project?.name ?? "Dashboard"} />
+      <Header title="Dashboard" actionButtons={<SetupTracingButton />} />
       <div className="my-3 flex flex-wrap items-center justify-between gap-2">
         <div className=" flex flex-col gap-2 lg:flex-row">
           <DatePickerWithRange
@@ -150,26 +151,28 @@ export default function Start() {
             onChange={useDebounce(setUserFilterState)}
           />
         </div>
-        <FeedbackButtonWrapper
-          title="Request Chart"
-          description="Your feedback matters! Let the Langfuse team know what additional data or metrics you'd like to see in your dashboard."
-          type="dashboard"
-          className="hidden lg:flex"
-        >
-          <Button
-            id="date"
-            variant={"outline"}
-            className={
-              "group justify-start gap-x-3 text-left font-semibold text-primary hover:bg-primary-foreground hover:text-primary-accent"
-            }
+        {uiCustomization?.feedbackHref === undefined && (
+          <FeedbackButtonWrapper
+            title="Request Chart"
+            description="Your feedback matters! Let the Langfuse team know what additional data or metrics you'd like to see in your dashboard."
+            type="dashboard"
+            className="hidden lg:flex"
           >
-            <BarChart2
-              className="hidden h-6 w-6 shrink-0 text-primary group-hover:text-primary-accent lg:block"
-              aria-hidden="true"
-            />
-            Request Chart
-          </Button>
-        </FeedbackButtonWrapper>
+            <Button
+              id="date"
+              variant={"outline"}
+              className={
+                "group justify-start gap-x-3 text-left font-semibold text-primary hover:bg-primary-foreground hover:text-primary-accent"
+              }
+            >
+              <BarChart2
+                className="hidden h-6 w-6 shrink-0 text-primary group-hover:text-primary-accent lg:block"
+                aria-hidden="true"
+              />
+              Request Chart
+            </Button>
+          </FeedbackButtonWrapper>
+        )}
       </div>
       <div className="grid w-full grid-cols-1 gap-4 overflow-hidden lg:grid-cols-2 xl:grid-cols-6">
         <TracesBarListChart
@@ -228,6 +231,14 @@ export default function Start() {
             className="col-span-1 flex-auto justify-between lg:col-span-full"
             projectId={projectId}
             agg={agg}
+            globalFilterState={mergedFilterState}
+          />
+        )}
+        {!disableExpensiveDashboardComponents && (
+          <ScoreAnalytics
+            className="col-span-1 flex-auto justify-between lg:col-span-full"
+            agg={agg}
+            projectId={projectId}
             globalFilterState={mergedFilterState}
           />
         )}

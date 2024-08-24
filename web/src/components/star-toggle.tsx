@@ -2,7 +2,7 @@ import { StarIcon } from "lucide-react";
 
 import { Button } from "@/src/components/ui/button";
 import { api } from "@/src/utils/api";
-import { useHasAccess } from "@/src/features/rbac/utils/checkAccess";
+import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { cn } from "@/src/utils/tailwind";
 import { type RouterOutput, type RouterInput } from "@/src/utils/types";
 import { useState } from "react";
@@ -40,6 +40,7 @@ export function StarToggle({
   );
 }
 
+// use by the trace table
 export function StarTraceToggle({
   tracesFilter,
   projectId,
@@ -54,7 +55,10 @@ export function StarTraceToggle({
   size?: "sm" | "xs";
 }) {
   const utils = api.useUtils();
-  const hasAccess = useHasAccess({ projectId, scope: "objects:bookmark" });
+  const hasAccess = useHasProjectAccess({
+    projectId,
+    scope: "objects:bookmark",
+  });
   const capture = usePostHogClientCapture();
   const [isLoading, setIsLoading] = useState(false);
 
@@ -127,6 +131,7 @@ export function StarTraceToggle({
   );
 }
 
+// use by the single trace view
 export function StarTraceDetailsToggle({
   projectId,
   traceId,
@@ -139,7 +144,10 @@ export function StarTraceDetailsToggle({
   size?: "sm" | "xs";
 }) {
   const utils = api.useUtils();
-  const hasAccess = useHasAccess({ projectId, scope: "objects:bookmark" });
+  const hasAccess = useHasProjectAccess({
+    projectId,
+    scope: "objects:bookmark",
+  });
   const capture = usePostHogClientCapture();
   const [isLoading, setIsLoading] = useState(false);
 
@@ -147,12 +155,15 @@ export function StarTraceDetailsToggle({
     onMutate: async () => {
       // Cancel any outgoing refetches
       // (so they don't overwrite our optimistic update)
-      await utils.traces.byId.cancel();
+      await utils.traces.byIdWithObservationsAndScores.cancel();
 
       setIsLoading(true);
 
       // Snapshot the previous value
-      const prevData = utils.traces.byId.getData({ traceId });
+      const prevData = utils.traces.byIdWithObservationsAndScores.getData({
+        traceId,
+        projectId,
+      });
 
       return { prevData };
     },
@@ -160,14 +171,21 @@ export function StarTraceDetailsToggle({
       setIsLoading(false);
       trpcErrorToast(err);
       // Rollback to the previous value if mutation fails
-      utils.traces.byId.setData({ traceId }, context?.prevData);
+      utils.traces.byIdWithObservationsAndScores.setData(
+        { traceId, projectId },
+        context?.prevData,
+      );
     },
     onSettled: () => {
       setIsLoading(false);
 
-      utils.traces.byId.setData(
-        { traceId },
-        (oldQueryData: RouterOutput["traces"]["byId"] | undefined) => {
+      utils.traces.byIdWithObservationsAndScores.setData(
+        { traceId, projectId },
+        (
+          oldQueryData:
+            | RouterOutput["traces"]["byIdWithObservationsAndScores"]
+            | undefined,
+        ) => {
           return oldQueryData
             ? {
                 ...oldQueryData,
@@ -176,7 +194,7 @@ export function StarTraceDetailsToggle({
             : undefined;
         },
       );
-      void utils.traces.byId.invalidate();
+      void utils.traces.byIdWithObservationsAndScores.invalidate();
       void utils.traces.all.invalidate();
     },
   });
@@ -214,7 +232,10 @@ export function StarSessionToggle({
   size?: "sm" | "xs";
 }) {
   const utils = api.useUtils();
-  const hasAccess = useHasAccess({ projectId, scope: "objects:bookmark" });
+  const hasAccess = useHasProjectAccess({
+    projectId,
+    scope: "objects:bookmark",
+  });
   const capture = usePostHogClientCapture();
   const mutBookmarkSession = api.sessions.bookmark.useMutation({
     onSuccess: () => {
