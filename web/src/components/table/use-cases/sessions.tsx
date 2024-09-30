@@ -25,6 +25,10 @@ import { useTableDateRange } from "@/src/hooks/useTableDateRange";
 import { useDebounce } from "@/src/hooks/useDebounce";
 import { joinTableCoreAndMetrics } from "@/src/components/table/utils/joinTableCoreAndMetrics";
 import { Skeleton } from "@/src/components/ui/skeleton";
+import TagList from "@/src/features/tag/components/TagList";
+import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
+import { cn } from "@/src/utils/tailwind";
+import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
 
 export type SessionTableRow = {
   id: string;
@@ -39,6 +43,7 @@ export type SessionTableRow = {
   inputTokens: number | undefined;
   outputTokens: number | undefined;
   totalTokens: number | undefined;
+  traceTags: string[] | undefined;
 };
 
 export type SessionTableProps = {
@@ -54,11 +59,12 @@ export default function SessionsTable({
 }: SessionTableProps) {
   const { setDetailPageList } = useDetailPageLists();
   const { selectedOption, dateRange, setDateRangeAndOption } =
-    useTableDateRange();
+    useTableDateRange(projectId);
 
   const [userFilterState, setUserFilterState] = useQueryFilterState(
     [],
     "sessions",
+    projectId,
   );
 
   const userIdFilter: FilterState = userId
@@ -90,18 +96,30 @@ export default function SessionsTable({
     pageSize: withDefault(NumberParam, 50),
   });
 
+  const [rowHeight, setRowHeight] = useRowHeightLocalStorage("sessions", "s");
+
   const [orderByState, setOrderByState] = useOrderByState({
     column: "createdAt",
     order: "DESC",
   });
 
-  const sessions = api.sessions.all.useQuery({
-    page: paginationState.pageIndex,
-    limit: paginationState.pageSize,
+  const payloadCount = {
     projectId,
     filter: filterState,
+    orderBy: null,
+    page: 0,
+    limit: 1,
+  };
+
+  const payloadGetAll = {
+    ...payloadCount,
     orderBy: orderByState,
-  });
+    page: paginationState.pageIndex,
+    limit: paginationState.pageSize,
+  };
+
+  const sessions = api.sessions.all.useQuery(payloadGetAll);
+  const sessionCountQuery = api.sessions.countAll.useQuery(payloadCount);
 
   const sessionMetrics = api.sessions.metrics.useQuery(
     {
@@ -124,6 +142,10 @@ export default function SessionsTable({
   const filterOptions = api.sessions.filterOptions.useQuery(
     {
       projectId,
+      timestampFilter:
+        dateRangeFilter[0]?.type === "datetime"
+          ? dateRangeFilter[0]
+          : undefined,
     },
     {
       trpc: {
@@ -134,7 +156,7 @@ export default function SessionsTable({
     },
   );
 
-  const totalCount = sessions.data?.totalCount ?? 0;
+  const totalCount = sessionCountQuery.data?.totalCount ?? null;
   useEffect(() => {
     if (sessions.isSuccess) {
       setDetailPageList(
@@ -149,6 +171,7 @@ export default function SessionsTable({
     {
       accessorKey: "bookmarked",
       id: "bookmarked",
+      isPinned: true,
       header: undefined,
       size: 50,
       cell: ({ row }) => {
@@ -162,7 +185,7 @@ export default function SessionsTable({
             sessionId={sessionId}
             projectId={projectId}
             value={bookmarked}
-            size="xs"
+            size="icon-xs"
           />
         ) : undefined;
       },
@@ -173,6 +196,7 @@ export default function SessionsTable({
       id: "id",
       header: "ID",
       size: 200,
+      isPinned: true,
       cell: ({ row }) => {
         const value: SessionTableRow["id"] = row.getValue("id");
         return value && typeof value === "string" ? (
@@ -391,6 +415,32 @@ export default function SessionsTable({
         );
       },
     },
+    {
+      accessorKey: "traceTags",
+      id: "traceTags",
+      header: "Trace Tags",
+      size: 250,
+      enableHiding: true,
+      defaultHidden: true,
+      cell: ({ row }) => {
+        const value: SessionTableRow["traceTags"] = row.getValue("traceTags");
+        if (!sessionMetrics.isSuccess) {
+          return <Skeleton className="h-3 w-1/2" />;
+        }
+        return (
+          value && (
+            <div
+              className={cn(
+                "flex gap-x-2 gap-y-1",
+                rowHeight !== "s" && "flex-wrap",
+              )}
+            >
+              <TagList selectedTags={value} isLoading={false} viewOnly />
+            </div>
+          )
+        );
+      },
+    },
   ];
 
   const transformFilterOptions = () => {
@@ -402,6 +452,11 @@ export default function SessionsTable({
   const [columnVisibility, setColumnVisibility] =
     useColumnVisibility<SessionTableRow>("sessionsColumnVisibility", columns);
 
+  const [columnOrder, setColumnOrder] = useColumnOrder<SessionTableRow>(
+    "sessionsColumnOrder",
+    columns,
+  );
+
   return (
     <>
       <DataTableToolbar
@@ -411,6 +466,8 @@ export default function SessionsTable({
         columns={columns}
         columnVisibility={columnVisibility}
         setColumnVisibility={setColumnVisibility}
+        columnOrder={columnOrder}
+        setColumnOrder={setColumnOrder}
         actionButtons={[
           <BatchExportTableButton
             {...{ projectId, filterState, orderByState }}
@@ -421,6 +478,8 @@ export default function SessionsTable({
         selectedOption={selectedOption}
         setDateRangeAndOption={setDateRangeAndOption}
         columnsWithCustomSelect={["userIds"]}
+        rowHeight={rowHeight}
+        setRowHeight={setRowHeight}
       />
       <DataTable
         columns={columns}
@@ -449,11 +508,12 @@ export default function SessionsTable({
                     inputTokens: session.promptTokens,
                     outputTokens: session.completionTokens,
                     totalTokens: session.totalTokens,
+                    traceTags: session.traceTags,
                   })),
                 }
         }
         pagination={{
-          pageCount: Math.ceil(totalCount / paginationState.pageSize),
+          totalCount,
           onChange: setPaginationState,
           state: paginationState,
         }}
@@ -461,11 +521,14 @@ export default function SessionsTable({
         orderBy={orderByState}
         columnVisibility={columnVisibility}
         onColumnVisibilityChange={setColumnVisibility}
+        columnOrder={columnOrder}
+        onColumnOrderChange={setColumnOrder}
         help={{
           description:
             "A session is a collection of related traces, such as a conversation or thread. To begin, add a sessionId to the trace.",
           href: "https://langfuse.com/docs/tracing-features/sessions",
         }}
+        rowHeight={rowHeight}
       />
     </>
   );

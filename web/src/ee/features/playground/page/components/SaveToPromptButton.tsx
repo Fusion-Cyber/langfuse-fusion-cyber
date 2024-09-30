@@ -37,21 +37,18 @@ export const SaveToPromptButton: React.FC = () => {
   const projectId = useProjectIdFromURL();
   const { setPlaygroundCache } = usePlaygroundCache();
 
-  const allPromptNames =
-    api.prompts.all
+  const allChatPromptNamesWithIds =
+    api.prompts.allNames
       .useQuery(
         {
           projectId: projectId as string, // Typecast as query is enabled only when projectId is present
-          filter: [],
-          orderBy: { column: "name", order: "ASC" },
-          page: 0,
+          type: PromptType.Chat,
         },
         { enabled: Boolean(projectId) },
       )
-      .data?.prompts.filter((prompt) => prompt.type === PromptType.Chat)
-      .map((prompt) => ({
-        label: prompt.name,
-        value: prompt.id,
+      .data?.map((prompt) => ({
+        name: prompt.name,
+        id: prompt.id,
       })) ?? [];
 
   const handleNewPrompt = async () => {
@@ -91,7 +88,7 @@ export const SaveToPromptButton: React.FC = () => {
       <PopoverTrigger asChild>
         <Button variant={"outline"} title="Save to prompt" asChild>
           <Link href={`/project/${projectId}/playground`}>
-            <FileInput className="mr-1 h-5 w-5" />
+            <FileInput className="mr-1 h-4 w-4" />
             <span>Save as prompt</span>
           </Link>
         </Button>
@@ -109,16 +106,16 @@ export const SaveToPromptButton: React.FC = () => {
           </CommandEmpty>
           <CommandGroup className="mt-2">
             <CommandList>
-              {allPromptNames.map((promptName) => (
+              {allChatPromptNamesWithIds.map((chatPrompt) => (
                 <CommandItem
-                  key={promptName.value}
-                  title={promptName.label}
-                  value={promptName.label}
+                  key={chatPrompt.id}
+                  title={chatPrompt.name}
+                  value={chatPrompt.name}
                   onSelect={(currentValue) => {
                     const promptId =
-                      allPromptNames.find(
-                        (prompt) => prompt.label === currentValue,
-                      )?.value ?? "";
+                      allChatPromptNamesWithIds.find(
+                        (prompt) => prompt.name === currentValue,
+                      )?.id ?? "";
 
                     setSelectedPromptId(
                       promptId === selectedPromptId ? "" : promptId,
@@ -128,13 +125,13 @@ export const SaveToPromptButton: React.FC = () => {
                   <Check
                     className={cn(
                       "mr-2 h-4 w-4",
-                      selectedPromptId === promptName.value
+                      selectedPromptId === chatPrompt.id
                         ? "opacity-100"
                         : "opacity-0",
                     )}
                   />
                   <span className="overflow-hidden text-ellipsis whitespace-nowrap">
-                    {promptName.label}
+                    {chatPrompt.name}
                   </span>
                 </CommandItem>
               ))}
@@ -155,7 +152,7 @@ export const SaveToPromptButton: React.FC = () => {
 
 export function Divider() {
   return (
-    <div className="my-6 flex flex-row justify-center align-middle">
+    <div className="my-3 flex flex-row justify-center align-middle">
       <div className="flex flex-1 flex-col">
         <div className="flex-1 border-b-2 border-gray-200" />
         <div className="flex-1" />

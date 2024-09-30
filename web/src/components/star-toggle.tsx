@@ -13,13 +13,13 @@ export function StarToggle({
   value,
   disabled = false,
   onClick,
-  size = "sm",
+  size = "icon",
   isLoading,
 }: {
   value: boolean;
   disabled?: boolean;
   onClick: (value: boolean) => Promise<unknown>;
-  size?: "sm" | "xs";
+  size?: "icon" | "icon-xs";
   isLoading: boolean;
 }) {
   return (
@@ -46,13 +46,13 @@ export function StarTraceToggle({
   projectId,
   traceId,
   value,
-  size = "sm",
+  size = "icon",
 }: {
   tracesFilter: RouterInput["traces"]["all"];
   projectId: string;
   traceId: string;
   value: boolean;
-  size?: "sm" | "xs";
+  size?: "icon" | "icon-xs";
 }) {
   const utils = api.useUtils();
   const hasAccess = useHasProjectAccess({
@@ -63,48 +63,35 @@ export function StarTraceToggle({
   const [isLoading, setIsLoading] = useState(false);
 
   const mutBookmarkTrace = api.traces.bookmark.useMutation({
-    // Optimistic update
-    // Tanstack docs: https://tanstack.com/query/v4/docs/react/guides/optimistic-updates
-
-    onMutate: async () => {
-      // Cancel any outgoing refetches
-      // (so they don't overwrite our optimistic update)
+    onMutate: async (newBookmarkState) => {
       await utils.traces.all.cancel();
-
       setIsLoading(true);
 
-      // Snapshot the previous value
-      const prev = utils.traces.all.getData(tracesFilter);
+      const previousData = utils.traces.all.getData(tracesFilter);
 
-      return { prev };
+      utils.traces.all.setData(tracesFilter, (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          traces: old.traces.map((trace) =>
+            trace.id === traceId
+              ? { ...trace, bookmarked: newBookmarkState.bookmarked }
+              : trace,
+          ),
+        };
+      });
+
+      return { previousData };
     },
-    onError: (err, _newTodo, context) => {
+    onError: (err, newBookmarkState, context) => {
       setIsLoading(false);
-      // Rollback to the previous value if mutation fails
       trpcErrorToast(err);
-      utils.traces.all.setData(tracesFilter, context?.prev);
+      if (context?.previousData) {
+        utils.traces.all.setData(tracesFilter, context.previousData);
+      }
     },
     onSettled: () => {
       setIsLoading(false);
-      utils.traces.all.setData(
-        tracesFilter,
-        (oldQueryData: RouterOutput["traces"]["all"] | undefined) => {
-          return {
-            totalCount: oldQueryData?.totalCount,
-            traces: oldQueryData?.traces
-              ? oldQueryData.traces.map((trace) => {
-                  return {
-                    ...trace,
-                    bookmarked:
-                      trace.id === traceId
-                        ? !trace.bookmarked
-                        : trace.bookmarked,
-                  };
-                })
-              : [],
-          };
-        },
-      );
       void utils.traces.all.invalidate();
     },
   });
@@ -115,16 +102,16 @@ export function StarTraceToggle({
       size={size}
       disabled={!hasAccess}
       isLoading={isLoading}
-      onClick={(value) => {
+      onClick={(newValue) => {
         capture("table:bookmark_button_click", {
           table: "traces",
           id: traceId,
-          value: value,
+          value: newValue,
         });
         return mutBookmarkTrace.mutateAsync({
           projectId,
           traceId,
-          bookmarked: value,
+          bookmarked: newValue,
         });
       }}
     />
@@ -136,12 +123,12 @@ export function StarTraceDetailsToggle({
   projectId,
   traceId,
   value,
-  size = "sm",
+  size = "icon",
 }: {
   projectId: string;
   traceId: string;
   value: boolean;
-  size?: "sm" | "xs";
+  size?: "icon" | "icon-xs";
 }) {
   const utils = api.useUtils();
   const hasAccess = useHasProjectAccess({
@@ -224,12 +211,12 @@ export function StarSessionToggle({
   projectId,
   sessionId,
   value,
-  size = "sm",
+  size = "icon",
 }: {
   projectId: string;
   sessionId: string;
   value: boolean;
-  size?: "sm" | "xs";
+  size?: "icon" | "icon-xs";
 }) {
   const utils = api.useUtils();
   const hasAccess = useHasProjectAccess({

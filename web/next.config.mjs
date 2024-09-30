@@ -11,8 +11,8 @@ import { env } from "./src/env.mjs";
  * img-src https to allow loading images from SSO providers
  */
 const cspHeader = `
-  default-src 'self' https://*.langfuse.com https://*.posthog.com https://*.sentry.io wss://*.crisp.chat https://*.crisp.chat;
-  script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.langfuse.com https://client.crisp.chat https://settings.crisp.chat https://challenges.cloudflare.com https://*.sentry.io https://ph.langfuse.com https://static.cloudflareinsights.com https://*.stripe.com;
+  default-src 'self' https://*.langfuse.com https://*.langfuse.dev https://*.posthog.com https://*.sentry.io wss://*.crisp.chat https://*.crisp.chat;
+  script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.langfuse.com https://*.langfuse.dev https://client.crisp.chat https://settings.crisp.chat https://challenges.cloudflare.com https://*.sentry.io  https://static.cloudflareinsights.com https://*.stripe.com;
   style-src 'self' 'unsafe-inline' https://client.crisp.chat;
   img-src 'self' https: blob: data: https://client.crisp.chat https://image.crisp.chat https://storage.crisp.chat;
   font-src 'self' https://client.crisp.chat;
@@ -22,7 +22,7 @@ const cspHeader = `
   base-uri 'self';
   form-action 'self';
   frame-ancestors 'none';
-  connect-src 'self' https://client.crisp.chat https://storage.crisp.chat wss://client.relay.crisp.chat wss://stream.relay.crisp.chat https://*.ingest.us.sentry.io https://ph.langfuse.com;
+  connect-src 'self' https://*.langfuse.com https://*.langfuse.dev https://client.crisp.chat https://storage.crisp.chat wss://client.relay.crisp.chat wss://stream.relay.crisp.chat https://*.ingest.us.sentry.io;
   media-src 'self' https://client.crisp.chat;
   ${env.LANGFUSE_CSP_ENFORCE_HTTPS === "true" ? "upgrade-insecure-requests; block-all-mixed-content;" : ""}
   ${env.SENTRY_CSP_REPORT_URI ? `report-uri ${env.SENTRY_CSP_REPORT_URI}; report-to csp-endpoint;` : ""}
@@ -55,6 +55,7 @@ const nextConfig = {
     ],
   },
   poweredByHeader: false,
+  basePath: env.NEXT_PUBLIC_BASE_PATH,
 
   /**
    * If you have `experimental: { appDir: true }` set, then you must comment the below `i18n` config
@@ -104,22 +105,22 @@ const nextConfig = {
       // Required to check authentication status from langfuse.com
       ...(env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION !== undefined
         ? [
-            {
-              source: "/api/auth/session",
-              headers: [
-                {
-                  key: "Access-Control-Allow-Origin",
-                  value: "https://langfuse.com",
-                },
-                { key: "Access-Control-Allow-Credentials", value: "true" },
-                { key: "Access-Control-Allow-Methods", value: "GET,POST" },
-                {
-                  key: "Access-Control-Allow-Headers",
-                  value: "Content-Type, Authorization",
-                },
-              ],
-            },
-          ]
+          {
+            source: "/api/auth/session",
+            headers: [
+              {
+                key: "Access-Control-Allow-Origin",
+                value: "https://langfuse.com",
+              },
+              { key: "Access-Control-Allow-Credentials", value: "true" },
+              { key: "Access-Control-Allow-Methods", value: "GET,POST" },
+              {
+                key: "Access-Control-Allow-Headers",
+                value: "Content-Type, Authorization",
+              },
+            ],
+          },
+        ]
         : []),
       // all files in /public/generated are public and can be accessed from any origin, e.g. to render an API reference based on our openapi schema
       {
@@ -149,39 +150,44 @@ const nextConfig = {
   },
 };
 
-const sentryOptions = {
-  // Additional config options for the Sentry Webpack plugin. Keep in mind that
-  // the following options are set automatically, and overriding them is not
-  // recommended:
-  //   release, url, authToken, configFile, stripPrefix,
-  //   urlPrefix, include, ignore
+export default withSentryConfig(nextConfig, {
+  // For all available options, see:
+  // https://github.com/getsentry/sentry-webpack-plugin#options
 
   org: process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
 
-  silent: true, // Suppresses all logs
+  authToken: env.SENTRY_AUTH_TOKEN,
+
+  // Only print logs for uploading source maps in CI
+  silent: !process.env.CI,
 
   // For all available options, see:
-  // https://github.com/getsentry/sentry-webpack-plugin#options.
+  // https://docs.sentry.io/platforms/javascript/guides/nextjs/manual-setup/
 
-  // See the sections below for information on the following options:
-  //   'Configure Source Maps':
-  //     - disableServerWebpackPlugin
-  //     - disableClientWebpackPlugin
-  //     - hideSourceMaps
+  // Upload a larger set of source maps for prettier stack traces (increases build time)
+  widenClientFileUpload: true,
+
+  // Automatically annotate React components to show their full name in breadcrumbs and session replay
+  reactComponentAnnotation: {
+    enabled: true,
+  },
+
+  // Route browser requests to Sentry through a Next.js rewrite to circumvent ad-blockers.
+  // This can increase your server load as well as your hosting bill.
+  // Note: Check that the configured route will not match with your Next.js middleware, otherwise reporting of client-
+  // side errors will fail.
+  // tunnelRoute: "/api/monitoring-tunnel",
+
+  // Hides source maps from generated client bundles
   hideSourceMaps: true,
-  //     - widenClientFileUpload
-  //   'Configure Legacy Browser Support':
-  //     - transpileClientSDK
-  //   'Configure Serverside Auto-instrumentation':
-  //     - autoInstrumentServerFunctions
-  //     - excludeServerRoutes
-  //   'Configure Tunneling':
-  //     - tunnelRoute
 
-  // An auth token is required for uploading source maps.
-  authToken: env.SENTRY_AUTH_TOKEN,
-  tunnelRoute: "/api/monitoring-tunnel",
-};
+  // Automatically tree-shake Sentry logger statements to reduce bundle size
+  disableLogger: true,
 
-export default withSentryConfig(nextConfig, sentryOptions);
+  // Enables automatic instrumentation of Vercel Cron Monitors. (Does not yet work with App Router route handlers.)
+  // See the following for more information:
+  // https://docs.sentry.io/product/crons/
+  // https://vercel.com/docs/cron-jobs
+  automaticVercelMonitors: false,
+});

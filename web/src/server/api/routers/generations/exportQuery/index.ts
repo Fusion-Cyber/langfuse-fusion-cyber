@@ -2,17 +2,18 @@ import { z } from "zod";
 
 import { env } from "@/src/env.mjs";
 import { BatchExportFileFormat, exportOptions } from "@langfuse/shared";
-import { S3StorageService } from "@langfuse/shared/src/server";
+import {
+  type FullObservations,
+  logger,
+  S3StorageService,
+} from "@langfuse/shared/src/server";
 import { protectedProjectProcedure } from "@/src/server/api/trpc";
 import { type ObservationView } from "@langfuse/shared/src/db";
 import {
   DatabaseReadStream,
   streamTransformations,
 } from "@langfuse/shared/src/server";
-import {
-  type FullObservations,
-  getAllGenerations as getAllGenerations,
-} from "../db/getAllGenerationsSqlQuery";
+import { getAllGenerations as getAllGenerations } from "../db/getAllGenerationsSqlQuery";
 import { GenerationTableOptions } from "../utils/GenerationTableOptions";
 
 const generationsExportInput = GenerationTableOptions.extend({
@@ -72,7 +73,9 @@ export const generationsExportQuery = protectedProjectProcedure
     const endpoint = env.S3_ENDPOINT;
     const region = env.S3_REGION;
 
-    if (accessKeyId && secretAccessKey && bucketName && endpoint && region) {
+    // If bucketName is configured, we expect that the user has some valid S3 setup.
+    if (bucketName) {
+      logger.info(`Preparing export for ${fileName} on S3`);
       const { signedUrl } = await new S3StorageService({
         accessKeyId,
         secretAccessKey,
@@ -93,6 +96,7 @@ export const generationsExportQuery = protectedProjectProcedure
       };
     }
 
+    logger.info(`Preparing export for ${fileName} in memory`);
     // Fall back to returning the data directly. This might fail for large exports due to memory constraints.
     // Self-hosted instances should always run with sufficient memory or have S3 configured to avoid this.
     let fileOutputString = "";

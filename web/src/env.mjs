@@ -120,6 +120,8 @@ export const env = createEnv({
     LANGFUSE_UI_DOCUMENTATION_HREF: z.string().url().optional(),
     LANGFUSE_UI_SUPPORT_HREF: z.string().url().optional(),
     LANGFUSE_UI_FEEDBACK_HREF: z.string().url().optional(),
+    LANGFUSE_UI_LOGO_LIGHT_MODE_HREF: z.string().url().optional(),
+    LANGFUSE_UI_LOGO_DARK_MODE_HREF: z.string().url().optional(),
     // EE License
     LANGFUSE_EE_LICENSE_KEY: z.string().optional(),
     ADMIN_API_KEY: z.string().optional(),
@@ -146,6 +148,15 @@ export const env = createEnv({
     // langfuse caching
     LANGFUSE_CACHE_API_KEY_ENABLED: z.enum(["true", "false"]).default("false"),
     LANGFUSE_CACHE_API_KEY_TTL_SECONDS: z.coerce.number().default(120),
+    LANGFUSE_S3_EVENT_UPLOAD_ENABLED: z
+      .enum(["true", "false"])
+      .default("false"),
+    LANGFUSE_S3_EVENT_UPLOAD_BUCKET: z.string().optional(),
+    LANGFUSE_S3_EVENT_UPLOAD_PREFIX: z.string().default(""),
+    LANGFUSE_S3_EVENT_UPLOAD_REGION: z.string().optional(),
+    LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: z.string().optional(),
+    LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: z.string().optional(),
+    LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: z.string().optional(),
     LANGFUSE_ASYNC_INGESTION_PROCESSING: z
       .enum(["true", "false"])
       .default("false"),
@@ -170,6 +181,16 @@ export const env = createEnv({
     STRIPE_WEBHOOK_SIGNING_SECRET: z.string().optional(),
     SENTRY_AUTH_TOKEN: z.string().optional(),
     SENTRY_CSP_REPORT_URI: z.string().optional(),
+    LANGFUSE_RATE_LIMITS_ENABLED: z.enum(["true", "false"]).default("true"),
+    LANGFUSE_INIT_ORG_ID: z.string().optional(),
+    LANGFUSE_INIT_ORG_NAME: z.string().optional(),
+    LANGFUSE_INIT_PROJECT_ID: z.string().optional(),
+    LANGFUSE_INIT_PROJECT_NAME: z.string().optional(),
+    LANGFUSE_INIT_PROJECT_PUBLIC_KEY: z.string().optional(),
+    LANGFUSE_INIT_PROJECT_SECRET_KEY: z.string().optional(),
+    LANGFUSE_INIT_USER_EMAIL: z.string().email().optional(),
+    LANGFUSE_INIT_USER_NAME: z.string().optional(),
+    LANGFUSE_INIT_USER_PASSWORD: z.string().optional(),
   },
 
   /**
@@ -193,6 +214,8 @@ export const env = createEnv({
     NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
     NEXT_PUBLIC_POSTHOG_HOST: z.string().optional(),
     NEXT_PUBLIC_CRISP_WEBSITE_ID: z.string().optional(),
+    NEXT_PUBLIC_BUILD_ID: z.string().optional(),
+    NEXT_PUBLIC_BASE_PATH: z.string().optional(),
   },
 
   /**
@@ -205,6 +228,7 @@ export const env = createEnv({
     NEXT_PUBLIC_DEMO_ORG_ID: process.env.NEXT_PUBLIC_DEMO_ORG_ID,
     DATABASE_URL: process.env.DATABASE_URL,
     NODE_ENV: process.env.NODE_ENV,
+    NEXT_PUBLIC_BUILD_ID: process.env.NEXT_PUBLIC_BUILD_ID,
     NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET,
     NEXTAUTH_COOKIE_DOMAIN: process.env.NEXTAUTH_COOKIE_DOMAIN,
     NEXTAUTH_URL: process.env.NEXTAUTH_URL,
@@ -276,6 +300,21 @@ export const env = createEnv({
     S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY,
     S3_BUCKET_NAME: process.env.S3_BUCKET_NAME,
     S3_REGION: process.env.S3_REGION,
+    // S3 event upload
+    LANGFUSE_S3_EVENT_UPLOAD_ENABLED:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_ENABLED,
+    LANGFUSE_S3_EVENT_UPLOAD_BUCKET:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
+    LANGFUSE_S3_EVENT_UPLOAD_PREFIX:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_PREFIX,
+    LANGFUSE_S3_EVENT_UPLOAD_REGION:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_REGION,
+    LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT,
+    LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID,
+    LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:
+      process.env.LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY,
     // Database exports
     DB_EXPORT_PAGE_SIZE: process.env.DB_EXPORT_PAGE_SIZE,
     // Worker
@@ -296,6 +335,10 @@ export const env = createEnv({
     LANGFUSE_UI_DOCUMENTATION_HREF: process.env.LANGFUSE_UI_DOCUMENTATION_HREF,
     LANGFUSE_UI_SUPPORT_HREF: process.env.LANGFUSE_UI_SUPPORT_HREF,
     LANGFUSE_UI_FEEDBACK_HREF: process.env.LANGFUSE_UI_FEEDBACK_HREF,
+    LANGFUSE_UI_LOGO_LIGHT_MODE_HREF:
+      process.env.LANGFUSE_UI_LOGO_LIGHT_MODE_HREF,
+    LANGFUSE_UI_LOGO_DARK_MODE_HREF:
+      process.env.LANGFUSE_UI_LOGO_DARK_MODE_HREF,
     // EE License
     LANGFUSE_EE_LICENSE_KEY: process.env.LANGFUSE_EE_LICENSE_KEY,
     ADMIN_API_KEY: process.env.ADMIN_API_KEY,
@@ -319,6 +362,20 @@ export const env = createEnv({
     STRIPE_WEBHOOK_SIGNING_SECRET: process.env.STRIPE_WEBHOOK_SIGNING_SECRET,
     SENTRY_AUTH_TOKEN: process.env.SENTRY_AUTH_TOKEN,
     SENTRY_CSP_REPORT_URI: process.env.SENTRY_CSP_REPORT_URI,
+    LANGFUSE_RATE_LIMITS_ENABLED: process.env.LANGFUSE_RATE_LIMITS_ENABLED,
+    // provisioning
+    LANGFUSE_INIT_ORG_ID: process.env.LANGFUSE_INIT_ORG_ID,
+    LANGFUSE_INIT_ORG_NAME: process.env.LANGFUSE_INIT_ORG_NAME,
+    LANGFUSE_INIT_PROJECT_ID: process.env.LANGFUSE_INIT_PROJECT_ID,
+    LANGFUSE_INIT_PROJECT_NAME: process.env.LANGFUSE_INIT_PROJECT_NAME,
+    LANGFUSE_INIT_PROJECT_PUBLIC_KEY:
+      process.env.LANGFUSE_INIT_PROJECT_PUBLIC_KEY,
+    LANGFUSE_INIT_PROJECT_SECRET_KEY:
+      process.env.LANGFUSE_INIT_PROJECT_SECRET_KEY,
+    LANGFUSE_INIT_USER_EMAIL: process.env.LANGFUSE_INIT_USER_EMAIL,
+    LANGFUSE_INIT_USER_NAME: process.env.LANGFUSE_INIT_USER_NAME,
+    LANGFUSE_INIT_USER_PASSWORD: process.env.LANGFUSE_INIT_USER_PASSWORD,
+    NEXT_PUBLIC_BASE_PATH: process.env.NEXT_PUBLIC_BASE_PATH,
   },
   // Skip validation in Docker builds
   // DOCKER_BUILD is set in Dockerfile

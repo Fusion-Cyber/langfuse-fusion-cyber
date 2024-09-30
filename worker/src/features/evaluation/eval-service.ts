@@ -7,6 +7,7 @@ import {
   QueueName,
   EvalExecutionEvent,
   TraceUpsertEventSchema,
+  tableColumnsToSqlFilterAndPrefix,
 } from "@langfuse/shared/src/server";
 import {
   ApiError,
@@ -19,7 +20,6 @@ import {
   LLMApiKeySchema,
   Prisma,
   singleFilter,
-  tableColumnsToSqlFilterAndPrefix,
   InvalidRequestError,
   variableMappingList,
   ZodModelConfig,
@@ -27,7 +27,7 @@ import {
 import { decrypt } from "@langfuse/shared/encryption";
 import { kyselyPrisma, prisma } from "@langfuse/shared/src/db";
 
-import logger from "../../logger";
+import { logger } from "@langfuse/shared/src/server";
 import { getEvalQueue } from "../../queues/evalQueue";
 
 // this function is used to determine which eval jobs to create for a given trace
@@ -54,7 +54,7 @@ export const createEvalJobs = async ({
 
   for (const config of configs) {
     if (config.status === "INACTIVE") {
-      logger.info(`Skipping inactive config ${config.id}`);
+      logger.debug(`Skipping inactive config ${config.id}`);
       continue;
     }
 
@@ -261,7 +261,7 @@ export const evaluate = async ({
     throw new InvalidRequestError("Output schema not found");
   }
 
-  const openAIFunction = z.object({
+  const evalScoreSchema = z.object({
     score: z.number().describe(parsedOutputSchema.score),
     reasoning: z.string().describe(parsedOutputSchema.reasoning),
   });
@@ -300,17 +300,13 @@ export const evaluate = async ({
         adapter: parsedKey.data.adapter,
         ...modelParams,
       },
-      functionCall: {
-        name: "evaluate",
-        description: "some description",
-        parameters: openAIFunction,
-      },
+      structuredOutputSchema: evalScoreSchema,
     });
   } catch (e) {
     throw new ApiError(`Failed to fetch LLM completion: ${e}`);
   }
 
-  const parsedLLMOutput = openAIFunction.parse(completion);
+  const parsedLLMOutput = evalScoreSchema.parse(completion);
 
   logger.info(
     `Evaluating job ${event.jobExecutionId} Parsed LLM output ${JSON.stringify(parsedLLMOutput)}`

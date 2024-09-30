@@ -33,6 +33,7 @@ import {
   type TraceOptions,
   tracesTableColsWithOptions,
   type ObservationLevel,
+  BatchExportTableName,
 } from "@langfuse/shared";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
 import { IOTableCell } from "@/src/components/ui/CodeJsonViewer";
@@ -46,6 +47,8 @@ import { type ScoreAggregate } from "@/src/features/scores/lib/types";
 import { useIndividualScoreColumns } from "@/src/features/scores/hooks/useIndividualScoreColumns";
 import { joinTableCoreAndMetrics } from "@/src/components/table/utils/joinTableCoreAndMetrics";
 import { Skeleton } from "@/src/components/ui/skeleton";
+import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
+import { BatchExportTableButton } from "@/src/components/BatchExportTableButton";
 
 export type TracesTableRow = {
   bookmarked: boolean;
@@ -98,10 +101,11 @@ export default function TracesTable({
   );
 
   const { selectedOption, dateRange, setDateRangeAndOption } =
-    useTableDateRange();
+    useTableDateRange(projectId);
   const [userFilterState, setUserFilterState] = useQueryFilterState(
     [],
     "traces",
+    projectId,
   );
   const [orderByState, setOrderByState] = useOrderByState({
     column: "timestamp",
@@ -135,15 +139,24 @@ export default function TracesTable({
     pageSize: withDefault(NumberParam, 50),
   });
 
-  const tracesAllQueryFilter = {
-    page: paginationState.pageIndex,
-    limit: paginationState.pageSize,
+  const tracesAllCountFilter = {
     projectId,
     filter: filterState,
     searchQuery,
+    // "empty" values as they do not matter for total count
+    page: 0,
+    limit: 0,
+    orderBy: null,
+  };
+
+  const tracesAllQueryFilter = {
+    ...tracesAllCountFilter,
+    page: paginationState.pageIndex,
+    limit: paginationState.pageSize,
     orderBy: orderByState,
   };
   const traces = api.traces.all.useQuery(tracesAllQueryFilter);
+  const totalCountQuery = api.traces.countAll.useQuery(tracesAllCountFilter);
   const traceMetrics = api.traces.metrics.useQuery(
     {
       projectId,
@@ -162,7 +175,8 @@ export default function TracesTable({
     TraceMetricOutput
   >(traces.data?.traces, traceMetrics.data);
 
-  const totalCount = traces.data?.totalCount ?? 0;
+  const totalCount = totalCountQuery.data?.totalCount ?? null;
+
   useEffect(() => {
     if (traces.isSuccess) {
       setDetailPageList(
@@ -215,6 +229,7 @@ export default function TracesTable({
       id: "select",
       accessorKey: "select",
       size: 30,
+      isPinned: true,
       header: ({ table }) => (
         <Checkbox
           checked={
@@ -248,6 +263,7 @@ export default function TracesTable({
       header: undefined,
       id: "bookmarked",
       size: 30,
+      isPinned: true,
       cell: ({ row }) => {
         const bookmarked: TracesTableRow["bookmarked"] =
           row.getValue("bookmarked");
@@ -259,7 +275,7 @@ export default function TracesTable({
             traceId={traceId}
             projectId={projectId}
             value={bookmarked}
-            size="xs"
+            size="icon-xs"
           />
         ) : undefined;
       },
@@ -270,6 +286,7 @@ export default function TracesTable({
       header: "ID",
       id: "id",
       size: 90,
+      isPinned: true,
       cell: ({ row }) => {
         const value: TracesTableRow["id"] = row.getValue("id");
         return value && typeof value === "string" ? (
@@ -645,6 +662,7 @@ export default function TracesTable({
       accessorKey: "action",
       header: "Action",
       size: 70,
+      isPinned: true,
       cell: ({ row }) => {
         const traceId: TracesTableRow["id"] = row.getValue("id");
         return traceId && typeof traceId === "string" ? (
@@ -666,6 +684,11 @@ export default function TracesTable({
       `tracesColumnVisibility-${projectId}`,
       columns,
     );
+
+  const [columnOrder, setColumnOrder] = useColumnOrder<TracesTableRow>(
+    "tracesColumnOrder",
+    columns,
+  );
 
   const rows = useMemo(() => {
     return traces.isSuccess
@@ -715,7 +738,7 @@ export default function TracesTable({
         filterState={userFilterState}
         setFilterState={useDebounce(setUserFilterState)}
         columnsWithCustomSelect={["name", "tags"]}
-        actionButtons={
+        actionButtons={[
           Object.keys(selectedRows).filter((traceId) =>
             traces.data?.traces.map((t) => t.id).includes(traceId),
           ).length > 0 ? (
@@ -729,10 +752,17 @@ export default function TracesTable({
                 setSelectedRows({});
               }}
             />
-          ) : null
-        }
+          ) : null,
+          <BatchExportTableButton
+            {...{ projectId, filterState, orderByState }}
+            tableName={BatchExportTableName.Traces}
+            key="batchExport"
+          />,
+        ]}
         columnVisibility={columnVisibility}
         setColumnVisibility={setColumnVisibility}
+        columnOrder={columnOrder}
+        setColumnOrder={setColumnOrder}
         rowHeight={rowHeight}
         setRowHeight={setRowHeight}
         selectedOption={selectedOption}
@@ -756,7 +786,7 @@ export default function TracesTable({
                 }
         }
         pagination={{
-          pageCount: Math.ceil(Number(totalCount) / paginationState.pageSize),
+          totalCount,
           onChange: setPaginationState,
           state: paginationState,
         }}
@@ -766,6 +796,8 @@ export default function TracesTable({
         setRowSelection={setSelectedRows}
         columnVisibility={columnVisibility}
         onColumnVisibilityChange={setColumnVisibility}
+        columnOrder={columnOrder}
+        onColumnOrderChange={setColumnOrder}
         rowHeight={rowHeight}
       />
     </>

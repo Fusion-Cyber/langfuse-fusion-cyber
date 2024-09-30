@@ -21,6 +21,10 @@
       "import": "./dist/src/server/index.js",
       "require": "./dist/src/server/index.js"
     },
+    "./src/server/auth/apiKeys": {
+      "import": "./dist/src/server/auth/apiKeys.js",
+      "require": "./dist/src/server/auth/apiKeys.js"
+    },
     "./encryption": {
       "import": "./dist/src/encryption/index.js",
       "require": "./dist/src/encryption/index.js"
@@ -51,12 +55,12 @@
   "dependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
     "@aws-sdk/client-s3": "^3.627.0",
-    "@aws-sdk/lib-storage": "^3.568.0",
+    "@aws-sdk/lib-storage": "^3.645.0",
     "@aws-sdk/s3-request-presigner": "^3.554.0",
     "@clickhouse/client": "^1.4.0",
-    "@langchain/anthropic": "^0.1.21",
-    "@langchain/core": "^0.1.61",
-    "@langchain/openai": "^0.0.33",
+    "@langchain/anthropic": "^0.3.1",
+    "@langchain/core": "^0.3.3",
+    "@langchain/openai": "^0.3.0",
     "@opentelemetry/api": ">=1.0.0 <1.9.0",
     "@prisma/client": "^5.17.0",
     "@react-email/components": "^0.0.19",
@@ -68,20 +72,22 @@
     "decimal.js": "^10.4.3",
     "exponential-backoff": "^3.1.1",
     "ioredis": "^5.4.1",
-    "kysely": "^0.27.3",
-    "langchain": "^0.2.6",
+    "kysely": "^0.27.4",
+    "langchain": "^0.3.2",
     "lodash": "^4.17.21",
     "next-auth": "^4.24.7",
     "nodemailer": "^6.9.13",
     "prisma-extension-kysely": "^2.1.0",
     "uuid": "^9.0.1",
+    "winston": "^3.14.2",
+    "winston-transport": "^4.7.1",
     "zod": "^3.23.8",
-    "zod-to-json-schema": "^3.22.5"
+    "zod-to-json-schema": "^3.23.2"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "@types/lodash": "^4.17.5",
+    "@types/lodash": "^4.17.9",
     "@types/node": "^20.11.29",
     "@types/nodemailer": "^6.4.15",
     "@types/pg": "^8.11.6",
@@ -103,7 +109,7 @@
     "vitest": "^1.5.3"
   },
   "peerDependencies": {
-    "@types/react": "^18.2.79",
-    "react": "^18.0.0"
+    "@types/react": "~18.2.79",
+    "react": "~18.2.0"
   }
 }

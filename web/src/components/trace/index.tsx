@@ -27,13 +27,14 @@ import {
 } from "lucide-react";
 import { usdFormatter } from "@/src/utils/numbers";
 import Decimal from "decimal.js";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { DeleteButton } from "@/src/components/deleteButton";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
 import { Tabs, TabsList, TabsTrigger } from "@/src/components/ui/tabs";
 import { TraceTimelineView } from "@/src/components/trace/TraceTimelineView";
 import { type APIScore } from "@langfuse/shared";
 import { useSession } from "next-auth/react";
+import { FullScreenPage } from "@/src/components/layouts/full-screen-page";
 
 export function Trace(props: {
   observations: Array<ObservationReturnType>;
@@ -57,14 +58,11 @@ export function Trace(props: {
     [],
   );
 
-  const observationObjectIds: string[] = useMemo(() => {
-    return props.observations.map(({ id }) => id);
-  }, [props.observations]);
+  const session = useSession();
 
-  const observationCommentCounts = api.comments.getCountsByObjectIds.useQuery(
+  const observationCommentCounts = api.comments.getCountByObjectType.useQuery(
     {
       projectId: props.trace.projectId,
-      objectIds: observationObjectIds,
       objectType: "OBSERVATION",
     },
     {
@@ -74,13 +72,14 @@ export function Trace(props: {
         },
       },
       refetchOnMount: false, // prevents refetching loops
+      enabled: session.status === "authenticated",
     },
   );
 
-  const traceCommentCounts = api.comments.getCountsByObjectIds.useQuery(
+  const traceCommentCounts = api.comments.getCountByObjectId.useQuery(
     {
       projectId: props.trace.projectId,
-      objectIds: [props.trace.id],
+      objectId: props.trace.id,
       objectType: "TRACE",
     },
     {
@@ -90,6 +89,7 @@ export function Trace(props: {
         },
       },
       refetchOnMount: false, // prevents refetching loops
+      enabled: session.status === "authenticated",
     },
   );
 
@@ -173,7 +173,7 @@ export function Trace(props: {
               });
               setScoresOnObservationTree(e);
             }}
-            size="sm"
+            size="xs"
             title="Show scores"
           >
             <Award className="h-4 w-4" />
@@ -186,7 +186,7 @@ export function Trace(props: {
               });
               setMetricsOnObservationTree(e);
             }}
-            size="sm"
+            size="xs"
             title="Show metrics"
           >
             {metricsOnObservationTree ? (
@@ -264,7 +264,7 @@ export function TracePage({ traceId }: { traceId: string }) {
     return <ErrorPage message="You do not have access to this trace." />;
   if (!trace.data) return <div>loading...</div>;
   return (
-    <div className="flex flex-col overflow-hidden 2xl:container md:h-[calc(100vh-2rem)]">
+    <FullScreenPage mobile={false} className="2xl:container">
       <Header
         title="Trace Detail"
         breadcrumb={[
@@ -387,7 +387,7 @@ export function TracePage({ traceId }: { traceId: string }) {
         </div>
       )}
       {selectedTab === "timeline" && (
-        <div className="mt-5 flex-1 flex-col space-y-5 overflow-hidden">
+        <div className="mt-5 max-h-[calc(100dvh-16rem)] flex-1 flex-col space-y-5 overflow-hidden">
           <TraceTimelineView
             key={trace.data.id}
             trace={trace.data}
@@ -397,7 +397,7 @@ export function TracePage({ traceId }: { traceId: string }) {
           />
         </div>
       )}
-    </div>
+    </FullScreenPage>
   );
 }
 

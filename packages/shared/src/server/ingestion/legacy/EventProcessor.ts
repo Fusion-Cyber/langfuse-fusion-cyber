@@ -12,18 +12,20 @@ import {
   sdkLogEvent,
 } from "../types";
 import { validateAndInflateScore } from "../validateAndInflateScore";
-import { ApiAccessScope } from "../../auth/types";
 import { Trace, Observation, Score, Prisma, Model } from "@prisma/client";
 import { ForbiddenError, LangfuseNotFoundError } from "../../../errors";
 import { mergeJson } from "../../../utils/json";
 import { jsonSchema } from "../../../utils/zod";
 import { prisma } from "../../../db";
+import { LegacyIngestionAccessScope } from ".";
+import { logger } from "../../logger";
+import { ApiAccessScope } from "../../auth/types";
 
 export interface EventProcessor {
-  auth(apiScope: ApiAccessScope): void;
+  auth(apiScope: LegacyIngestionAccessScope): void;
 
   process(
-    apiScope: ApiAccessScope
+    apiScope: LegacyIngestionAccessScope
   ): Promise<Trace | Observation | Score> | undefined;
 }
 
@@ -46,8 +48,8 @@ export class ObservationProcessor implements EventProcessor {
   }
 
   async convertToObservation(
-    apiScope: ApiAccessScope,
-    existingObservation: Observation | null
+    apiScope: LegacyIngestionAccessScope,
+    existingObservation: Omit<Observation, "input" | "output"> | null
   ): Promise<{
     id: string;
     create: Prisma.ObservationUncheckedCreateInput;
@@ -119,7 +121,8 @@ export class ObservationProcessor implements EventProcessor {
     // Token counts
     const [newInputCount, newOutputCount] =
       "usage" in this.event.body
-        ? this.calculateTokenCounts(
+        ? await this.calculateTokenCounts(
+            apiScope.projectId,
             this.event.body,
             this.calculateTokenDelegate,
             internalModel ?? undefined,
@@ -187,8 +190,9 @@ export class ObservationProcessor implements EventProcessor {
         : undefined;
 
     // Only null if promptName and promptVersion are set but prompt is not found
-    if (prompt === null)
-      console.warn("Prompt not found for observation", this.event.body);
+    if (prompt === null) {
+      logger.warn("Prompt not found for observation", this.event.body);
+    }
 
     const observationId = this.event.body.id ?? v4();
 
@@ -309,7 +313,8 @@ export class ObservationProcessor implements EventProcessor {
     };
   }
 
-  calculateTokenCounts(
+  async calculateTokenCounts(
+    projectId: string,
     body:
       | z.infer<typeof legacyObservationCreateEvent>["body"]
       | z.infer<typeof generationCreateEvent>["body"],
@@ -318,29 +323,59 @@ export class ObservationProcessor implements EventProcessor {
       text: unknown;
     }) => number | undefined,
     model?: Model,
-    existingObservation?: Observation
+    existingObservation?: Omit<Observation, "input" | "output">
   ) {
-    const newPromptTokens =
-      body.usage?.input ??
-      ((body.input || existingObservation?.input) && model && model.tokenizerId
-        ? calculateTokenDelegate({
-            model: model,
-            text: body.input ?? existingObservation?.input,
-          })
-        : undefined);
+    let newPromptTokens = body.usage?.input;
+    if (newPromptTokens === undefined && model && model.tokenizerId) {
+      if (body.input) {
+        newPromptTokens = calculateTokenDelegate({
+          model: model,
+          text: body.input,
+        });
+      } else {
+        logger.info(
+          `No input provided, trying to calculate for id: ${existingObservation?.id}`
+        );
+        const observationInput = await prisma.observation.findFirst({
+          where: { id: existingObservation?.id, projectId: projectId },
+          select: {
+            input: true,
+          },
+        });
 
-    const newCompletionTokens =
-      body.usage?.output ??
-      ((body.output || existingObservation?.output) &&
-      model &&
-      model.tokenizerId
-        ? calculateTokenDelegate({
-            model: model,
-            text: body.output ?? existingObservation?.output,
-          })
-        : undefined);
+        newPromptTokens = calculateTokenDelegate({
+          model: model,
+          text: observationInput?.input,
+        });
+      }
+    }
 
-    return [newPromptTokens, newCompletionTokens];
+    let newCompletionTokens = body.usage?.output;
+
+    if (newCompletionTokens === undefined && model && model.tokenizerId) {
+      if (body.output) {
+        newCompletionTokens = calculateTokenDelegate({
+          model: model,
+          text: body.output,
+        });
+      } else {
+        logger.info(
+          `No output provided, trying to calculate for id: ${existingObservation?.id}`
+        );
+        const observationOutput = await prisma.observation.findFirst({
+          where: { id: existingObservation?.id, projectId: projectId },
+          select: {
+            output: true,
+          },
+        });
+        newCompletionTokens = calculateTokenDelegate({
+          model: model,
+          text: observationOutput?.output,
+        });
+      }
+    }
+
+    return [newPromptTokens ?? undefined, newCompletionTokens ?? undefined];
   }
 
   static calculateTokenCosts(
@@ -398,17 +433,53 @@ export class ObservationProcessor implements EventProcessor {
     };
   }
 
-  auth(apiScope: ApiAccessScope): void {
+  auth(apiScope: LegacyIngestionAccessScope): void {
     if (apiScope.accessLevel !== "all")
       throw new ForbiddenError("Access denied for observation creation");
   }
 
-  async process(apiScope: ApiAccessScope): Promise<Observation> {
+  async process(apiScope: LegacyIngestionAccessScope): Promise<Observation> {
     this.auth(apiScope);
 
     const existingObservation = this.event.body.id
       ? await prisma.observation.findFirst({
-          where: { id: this.event.body.id },
+          select: {
+            // do not select I/O to spare our db
+            input: false,
+            output: false,
+
+            id: true,
+            traceId: true,
+            projectId: true,
+            type: true,
+            startTime: true,
+            endTime: true,
+            name: true,
+            metadata: true,
+            parentObservationId: true,
+            level: true,
+            statusMessage: true,
+            version: true,
+            createdAt: true,
+            updatedAt: true,
+            model: true,
+            internalModelId: true,
+            modelParameters: true,
+            promptTokens: true,
+            completionTokens: true,
+            totalTokens: true,
+            unit: true,
+            inputCost: true,
+            outputCost: true,
+            totalCost: true,
+            calculatedInputCost: true,
+            calculatedOutputCost: true,
+            calculatedTotalCost: true,
+            completionStartTime: true,
+            promptId: true,
+            internalModel: true,
+          },
+          where: { id: this.event.body.id, projectId: apiScope.projectId },
         })
       : null;
 
@@ -441,13 +512,13 @@ export class TraceProcessor implements EventProcessor {
     this.event = event;
   }
 
-  auth(apiScope: ApiAccessScope): void {
+  auth(apiScope: LegacyIngestionAccessScope): void {
     if (apiScope.accessLevel !== "all")
       throw new ForbiddenError("Access denied for trace creation");
   }
 
   async process(
-    apiScope: ApiAccessScope
+    apiScope: LegacyIngestionAccessScope
   ): Promise<Trace | Observation | Score> {
     const { body } = this.event;
 
@@ -455,11 +526,8 @@ export class TraceProcessor implements EventProcessor {
 
     const internalId = body.id ?? v4();
 
-    console.log(
-      "Trying to create trace, project ",
-      apiScope.projectId,
-      ", id:",
-      internalId
+    logger.debug(
+      `Trying to create trace, project ${apiScope.projectId}, id: ${internalId}`
     );
 
     const existingTrace = await prisma.trace.findFirst({
@@ -553,7 +621,7 @@ export class ScoreProcessor implements EventProcessor {
     this.event = event;
   }
 
-  auth(apiScope: ApiAccessScope) {
+  auth(apiScope: LegacyIngestionAccessScope) {
     if (apiScope.accessLevel !== "scores" && apiScope.accessLevel !== "all")
       throw new ForbiddenError(
         `Access denied for score creation, ${apiScope.accessLevel}`
@@ -561,7 +629,7 @@ export class ScoreProcessor implements EventProcessor {
   }
 
   async process(
-    apiScope: ApiAccessScope
+    apiScope: LegacyIngestionAccessScope
   ): Promise<Trace | Observation | Score> {
     const { body } = this.event;
 
@@ -613,13 +681,13 @@ export class SdkLogProcessor implements EventProcessor {
     this.event = event;
   }
 
-  auth(apiScope: ApiAccessScope) {
+  auth(apiScope: LegacyIngestionAccessScope) {
     return;
   }
 
   process() {
     try {
-      console.log("SDK Log", this.event);
+      logger.info("SDK Log", this.event);
       return undefined;
     } catch (error) {
       return undefined;

@@ -8,41 +8,29 @@ import {
 import { auditLog } from "@/src/features/audit-logs/auditLog";
 import { composeAggregateScoreKey } from "@/src/features/scores/lib/aggregateScores";
 import {
-  DASHBOARD_AGGREGATION_OPTIONS,
-  DEFAULT_AGGREGATION_SELECTION,
-  TABLE_RANGE_DROPDOWN_OPTIONS,
-  dashboardDateRangeAggregationSettings,
+  getDateFromOption,
+  SelectedTimeOptionSchema,
 } from "@/src/utils/date-range-utils";
-import { addMinutes } from "date-fns";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
 } from "@/src/server/api/trpc";
-import { tableDateRangeAggregationSettings } from "@/src/utils/date-range-utils";
 import {
   CreateAnnotationScoreData,
   orderBy,
-  orderByToPrismaSql,
   paginationZod,
   singleFilter,
-  tableColumnsToSqlFilterAndPrefix,
+  timeFilter,
   UpdateAnnotationScoreData,
   validateDbScore,
 } from "@langfuse/shared";
 import { Prisma, type Score } from "@langfuse/shared/src/db";
-
-const SelectedTimeOption = z
-  .discriminatedUnion("filterSource", [
-    z.object({
-      filterSource: z.literal("TABLE"),
-      option: z.enum(TABLE_RANGE_DROPDOWN_OPTIONS),
-    }),
-    z.object({
-      filterSource: z.literal("DASHBOARD"),
-      option: z.enum(DASHBOARD_AGGREGATION_OPTIONS),
-    }),
-  ])
-  .optional();
+import {
+  datetimeFilterToPrisma,
+  datetimeFilterToPrismaSql,
+  orderByToPrismaSql,
+  tableColumnsToSqlFilterAndPrefix,
+} from "@langfuse/shared/src/server";
 
 const ScoreFilterOptions = z.object({
   projectId: z.string(), // Required for protectedProjectProcedure
@@ -54,62 +42,27 @@ const ScoreAllOptions = ScoreFilterOptions.extend({
   ...paginationZod,
 });
 
-const getDateFromOption = (
-  selectedTimeOption: z.infer<typeof SelectedTimeOption>,
-): Date | undefined => {
-  if (!selectedTimeOption) return undefined;
-
-  const { filterSource, option } = selectedTimeOption;
-  if (filterSource === "TABLE") {
-    const setting =
-      tableDateRangeAggregationSettings[
-        option as keyof typeof tableDateRangeAggregationSettings
-      ];
-
-    return option !== DEFAULT_AGGREGATION_SELECTION
-      ? addMinutes(new Date(), -setting)
-      : undefined;
-  } else if (filterSource === "DASHBOARD") {
-    const setting =
-      dashboardDateRangeAggregationSettings[
-        option as keyof typeof dashboardDateRangeAggregationSettings
-      ];
-
-    return addMinutes(new Date(), -setting.minutes);
-  }
-  return undefined;
-};
-
 export const scoresRouter = createTRPCRouter({
   all: protectedProjectProcedure
     .input(ScoreAllOptions)
     .query(async ({ input, ctx }) => {
-      const filterCondition = tableColumnsToSqlFilterAndPrefix(
-        input.filter,
-        scoresTableCols,
-        "traces_scores",
-      );
+      const { filterCondition, orderByCondition } =
+        parseScoresGetAllOptions(input);
 
-      const orderByCondition = orderByToPrismaSql(
-        input.orderBy,
-        scoresTableCols,
-      );
-
-      const [scores, scoresCount] = await Promise.all([
-        // scores
-        ctx.prisma.$queryRaw<
-          Array<
-            Score & {
-              traceName: string | null;
-              traceUserId: string | null;
-              jobConfigurationId: string | null;
-              authorUserImage: string | null;
-              authorUserName: string | null;
-            }
-          >
-        >(
-          generateScoresQuery(
-            Prisma.sql` 
+      const scores = await ctx.prisma.$queryRaw<
+        Array<
+          Score & {
+            traceName: string | null;
+            traceUserId: string | null;
+            traceTags: Array<string> | null;
+            jobConfigurationId: string | null;
+            authorUserImage: string | null;
+            authorUserName: string | null;
+          }
+        >
+      >(
+        generateScoresQuery(
+          Prisma.sql` 
           s.id,
           s.name,
           s.value,
@@ -123,34 +76,44 @@ export const scoresRouter = createTRPCRouter({
           s.author_user_id AS "authorUserId",
           t.user_id AS "traceUserId",
           t.name AS "traceName",
+          t.tags AS "traceTags",
           je.job_configuration_id AS "jobConfigurationId",
           u.image AS "authorUserImage", 
           u.name AS "authorUserName"
           `,
-            input.projectId,
-            ctx.session.orgId,
-            filterCondition,
-            orderByCondition,
-            input.limit,
-            input.page,
-          ),
+          input.projectId,
+          ctx.session.orgId,
+          filterCondition,
+          orderByCondition,
+          input.limit,
+          input.page,
         ),
-        // scoresCount
-        await ctx.prisma.$queryRaw<Array<{ totalCount: bigint }>>(
-          generateScoresQuery(
-            Prisma.sql` count(*) AS "totalCount"`,
-            input.projectId,
-            ctx.session.orgId,
-            filterCondition,
-            Prisma.empty,
-            1, // limit
-            0, // page
-          ),
-        ),
-      ]);
+      );
 
       return {
         scores,
+      };
+    }),
+  countAll: protectedProjectProcedure
+    .input(ScoreAllOptions)
+    .query(async ({ input, ctx }) => {
+      const { filterCondition } = parseScoresGetAllOptions(input);
+
+      const scoresCount = await ctx.prisma.$queryRaw<
+        Array<{ totalCount: bigint }>
+      >(
+        generateScoresQuery(
+          Prisma.sql` count(*) AS "totalCount"`,
+          input.projectId,
+          ctx.session.orgId,
+          filterCondition,
+          Prisma.empty,
+          1, // limit
+          0, // page
+        ),
+      );
+
+      return {
         totalCount:
           scoresCount.length > 0 ? Number(scoresCount[0]?.totalCount) : 0,
       };
@@ -159,27 +122,53 @@ export const scoresRouter = createTRPCRouter({
     .input(
       z.object({
         projectId: z.string(),
+        timestampFilter: timeFilter.optional(),
       }),
     )
     .query(async ({ input, ctx }) => {
-      const names = await ctx.prisma.score.groupBy({
-        where: {
-          projectId: input.projectId,
-        },
-        by: ["name"],
-        _count: {
-          _all: true,
-        },
-        take: 1000,
-        orderBy: {
-          _count: {
-            id: "desc",
+      const { timestampFilter } = input;
+      const prismaTimestampFilter = timestampFilter
+        ? datetimeFilterToPrisma(timestampFilter)
+        : {};
+
+      const rawTimestampFilter =
+        timestampFilter && timestampFilter.type === "datetime"
+          ? datetimeFilterToPrismaSql(
+              "timestamp",
+              timestampFilter.operator,
+              timestampFilter.value,
+            )
+          : Prisma.empty;
+      const [names, tags] = await Promise.all([
+        ctx.prisma.score.groupBy({
+          where: {
+            projectId: input.projectId,
+            timestamp: prismaTimestampFilter,
           },
-        },
-      });
+          by: ["name"],
+          _count: {
+            _all: true,
+          },
+          take: 1000,
+          orderBy: {
+            _count: {
+              id: "desc",
+            },
+          },
+        }),
+        ctx.prisma.$queryRaw<{ value: string }[]>`
+          SELECT tags.tag as value
+          FROM traces, UNNEST(traces.tags) AS tags(tag)
+          WHERE traces.project_id = ${input.projectId} ${rawTimestampFilter}
+          GROUP BY tags.tag
+          ORDER BY tags.tag ASC
+          LIMIT 1000
+        `,
+      ]);
 
       const res: ScoreOptions = {
         name: names.map((i) => ({ value: i.name, count: i._count._all })),
+        tags: tags,
       };
 
       return res;
@@ -343,7 +332,7 @@ export const scoresRouter = createTRPCRouter({
     .input(
       z.object({
         projectId: z.string(),
-        selectedTimeOption: SelectedTimeOption,
+        selectedTimeOption: SelectedTimeOptionSchema,
       }),
     )
     .query(async ({ input, ctx }) => {
@@ -372,6 +361,17 @@ export const scoresRouter = createTRPCRouter({
       }));
     }),
 });
+
+const parseScoresGetAllOptions = (input: z.infer<typeof ScoreAllOptions>) => {
+  const filterCondition = tableColumnsToSqlFilterAndPrefix(
+    input.filter,
+    scoresTableCols,
+    "traces_scores",
+  );
+
+  const orderByCondition = orderByToPrismaSql(input.orderBy, scoresTableCols);
+  return { filterCondition, orderByCondition };
+};
 
 const generateScoresQuery = (
   select: Prisma.Sql,
