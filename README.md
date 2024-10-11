@@ -42,6 +42,10 @@
 
 ## Langfuse Overview
 
+## Redeploy
+
+`gcloud builds submit --config=cloudbuild.yaml`
+
 _Unmute video for voice-over_
 
 https://github.com/langfuse/langfuse/assets/2834609/a94062e9-c782-4ee9-af59-dee6370149a8

@@ -1,0 +1,26 @@
+substitutions:
+  _SERVICE_NAME: langfuse-fusion-cyber-1
+  _REGION: us-central1
+  _PROJECT_ID: gpod-ai
+
+tags: ["${_PROJECT_ID}", "${_SERVICE_NAME}"]
+
+steps:
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-cloud-run
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        gcloud beta run deploy ${_SERVICE_NAME} --image docker.io/langfuse/langfuse:2 \
+           --region ${_REGION} \
+           --project ${_PROJECT_ID} \
+           --platform managed \
+           --port 3000 \
+           --allow-unauthenticated \
+           --memory 2Gi \
+           --cpu 1 \
+           --min-instances 0 \
+           --max-instances 3 \
+           --set-env-vars HOSTNAME=0.0.0.0,DATABASE_URL="postgresql://cosmosgcp:%23Fusioncyber123@35.208.117.29:5432/langfuse?sslmode=none",DIRECT_URL="postgresql://cosmosgcp:%23Fusioncyber123@35.208.117.29:5432/langfuse?sslmode=none" \
+           --update-secrets "AUTH_GOOGLE_CLIENT_ID=AUTH_GOOGLE_CLIENT_ID:latest,AUTH_GOOGLE_CLIENT_SECRET=AUTH_GOOGLE_CLIENT_SECRET:latest,SALT=SALT:latest,NEXTAUTH_URL=NEXTAUTH_URL:latest,NEXTAUTH_SECRET=NEXTAUTH_SECRET:latest"
