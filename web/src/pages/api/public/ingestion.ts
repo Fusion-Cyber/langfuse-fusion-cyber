@@ -100,7 +100,7 @@ export default async function handler(
         header.toLowerCase().startsWith("x_langfuse")
       ) {
         currentSpan?.setAttributes({
-          [`langfuse.header.${header.slice(10).toLowerCase()}`]:
+          [`langfuse.header.${header.slice(11).toLowerCase().replaceAll("_", "-")}`]:
             req.headers[header],
         });
       }
@@ -118,13 +118,19 @@ export default async function handler(
       throw new UnauthorizedError(authCheck.error);
     }
 
-    const rateLimitCheck = await new RateLimitService(redis).rateLimitRequest(
-      authCheck.scope,
-      "ingestion",
-    );
+    try {
+      const rateLimitCheck = await new RateLimitService(redis).rateLimitRequest(
+        authCheck.scope,
+        "ingestion",
+      );
 
-    if (rateLimitCheck?.isRateLimited()) {
-      return rateLimitCheck.sendRestResponseIfLimited(res);
+      if (rateLimitCheck?.isRateLimited()) {
+        return rateLimitCheck.sendRestResponseIfLimited(res);
+      }
+    } catch (e) {
+      // If rate-limiter returns an error, we log it and continue processing.
+      // This allows us to fail open instead of reject requests.
+      logger.error("Error while rate limiting", e);
     }
 
     const batchType = z.object({
