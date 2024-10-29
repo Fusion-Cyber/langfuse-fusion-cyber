@@ -22,12 +22,13 @@ import {
   InvalidRequestError,
   variableMappingList,
   ZodModelConfig,
+  EvalTemplate,
 } from "@langfuse/shared";
 import { decrypt } from "@langfuse/shared/encryption";
 import { kyselyPrisma, prisma } from "@langfuse/shared/src/db";
-
 import { fetchLLMCompletion, logger } from "@langfuse/shared/src/server";
-import { getEvalQueue } from "../../queues/evalQueue";
+import { EvalExecutionQueue } from "../../queues/evalQueue";
+import { backOff } from "exponential-backoff";
 
 // this function is used to determine which eval jobs to create for a given trace
 // there might be multiple eval jobs to create for a single trace
@@ -129,7 +130,7 @@ export const createEvalJobs = async ({
       });
 
       // add the job to the next queue so that eval can be executed
-      getEvalQueue()?.add(
+      await EvalExecutionQueue.getInstance()?.add(
         QueueName.EvaluationExecution,
         {
           name: QueueJobs.EvaluationExecution,
@@ -211,12 +212,21 @@ export const evaluate = async ({
     .where("project_id", "=", event.projectId)
     .executeTakeFirstOrThrow();
 
-  const template = await kyselyPrisma.$kysely
-    .selectFrom("eval_templates")
-    .selectAll()
-    .where("id", "=", config.eval_template_id)
-    .where("project_id", "=", event.projectId)
-    .executeTakeFirstOrThrow();
+  if (!config || !config.eval_template_id) {
+    logger.error(
+      `Eval template not found for config ${config.eval_template_id}`
+    );
+    throw new InvalidRequestError(
+      `Eval template not found for config ${config.eval_template_id}`
+    );
+  }
+
+  const template = await prisma.evalTemplate.findFirstOrThrow({
+    where: {
+      id: config.eval_template_id,
+      projectId: event.projectId,
+    },
+  });
 
   logger.info(
     `Evaluating job ${job.id} for project ${event.projectId} with template ${template.id}. Searching for context...`
@@ -255,18 +265,18 @@ export const evaluate = async ({
       score: z.string(),
       reasoning: z.string(),
     })
-    .parse(template.output_schema);
+    .parse(template.outputSchema);
 
   if (!parsedOutputSchema) {
     throw new InvalidRequestError("Output schema not found");
   }
 
   const evalScoreSchema = z.object({
-    score: z.number().describe(parsedOutputSchema.score),
     reasoning: z.string().describe(parsedOutputSchema.reasoning),
+    score: z.number().describe(parsedOutputSchema.score),
   });
 
-  const modelParams = ZodModelConfig.parse(template.model_params);
+  const modelParams = ZodModelConfig.parse(template.modelParams);
 
   // the apiKey.secret_key must never be printed to the console or returned to the client.
   const apiKey = await prisma.llmApiKeys.findFirst({
@@ -287,33 +297,20 @@ export const evaluate = async ({
     );
   }
 
-  let completion: string;
-  try {
-    completion = await fetchLLMCompletion({
-      streaming: false,
-      apiKey: decrypt(parsedKey.data.secretKey), // decrypt the secret key
-      baseURL: parsedKey.data.baseURL || undefined,
-      messages: [
-        {
-          role: ChatMessageRole.System,
-          content: "You are an expert at evaluating LLM outputs.",
-        },
-        { role: ChatMessageRole.User, content: prompt },
-      ],
-      modelParams: {
-        provider: template.provider,
-        model: template.model,
-        adapter: parsedKey.data.adapter,
-        ...modelParams,
-      },
-      structuredOutputSchema: evalScoreSchema,
-      config: parsedKey.data.config,
-    });
-  } catch (e) {
-    throw new ApiError(`Failed to fetch LLM completion: ${e}`);
-  }
-
-  const parsedLLMOutput = evalScoreSchema.parse(completion);
+  const parsedLLMOutput = await backOff(
+    () =>
+      callLLM(
+        event.jobExecutionId,
+        parsedKey.data,
+        prompt,
+        modelParams,
+        template,
+        evalScoreSchema
+      ),
+    {
+      numOfAttempts: 2,
+    }
+  );
 
   logger.info(
     `Evaluating job ${event.jobExecutionId} Parsed LLM output ${JSON.stringify(parsedLLMOutput)}`
@@ -350,6 +347,44 @@ export const evaluate = async ({
     `Eval job ${job.id} for project ${event.projectId} completed with score ${parsedLLMOutput.score}`
   );
 };
+
+async function callLLM(
+  jeId: string,
+  llmApiKey: z.infer<typeof LLMApiKeySchema>,
+  prompt: string,
+  modelParams: z.infer<typeof ZodModelConfig>,
+  template: EvalTemplate,
+  evalScoreSchema: z.ZodObject<{ score: z.ZodNumber; reasoning: z.ZodString }>
+): Promise<z.infer<typeof evalScoreSchema>> {
+  try {
+    const completion = await fetchLLMCompletion({
+      streaming: false,
+      apiKey: decrypt(llmApiKey.secretKey), // decrypt the secret key
+      baseURL: llmApiKey.baseURL || undefined,
+      messages: [
+        {
+          role: ChatMessageRole.System,
+          content: "You are an expert at evaluating LLM outputs.",
+        },
+        { role: ChatMessageRole.User, content: prompt },
+      ],
+      modelParams: {
+        provider: template.provider,
+        model: template.model,
+        adapter: llmApiKey.adapter,
+        ...modelParams,
+      },
+      structuredOutputSchema: evalScoreSchema,
+      config: llmApiKey.config,
+    });
+    return evalScoreSchema.parse(completion);
+  } catch (e) {
+    logger.error(
+      `Evaluating job ${jeId} failed to call LLM. Eval will fail. ${e}`
+    );
+    throw new ApiError(`Failed to call LLM: ${e}`);
+  }
+}
 
 export function compileHandlebarString(
   handlebarString: string,

@@ -1,3 +1,5 @@
+import "./initialize";
+
 import express from "express";
 import cors from "cors";
 import * as middlewares from "./middlewares";
@@ -11,16 +13,16 @@ import {
   evalJobExecutorQueueProcessor,
 } from "./queues/evalQueue";
 import { batchExportQueueProcessor } from "./queues/batchExportQueue";
-import { repeatQueueProcessor } from "./queues/repeatQueue";
 import { onShutdown } from "./utils/shutdown";
 
 import helmet from "helmet";
 import { legacyIngestionQueueProcessor } from "./queues/legacyIngestionQueue";
 import { cloudUsageMeteringQueueProcessor } from "./queues/cloudUsageMeteringQueue";
 import { WorkerManager } from "./queues/workerManager";
-import { QueueName } from "@langfuse/shared/src/server";
+import { QueueName, logger } from "@langfuse/shared/src/server";
 import { env } from "./env";
 import { ingestionQueueProcessor } from "./queues/ingestionQueue";
+import { BackgroundMigrationManager } from "./backgroundMigrations/backgroundMigrationManager";
 
 const app = express();
 
@@ -38,8 +40,11 @@ app.use("/api", api);
 app.use(middlewares.notFound);
 app.use(middlewares.errorHandler);
 
-if (env.QUEUE_CONSUMER_REPEAT_QUEUE_IS_ENABLED === "true") {
-  WorkerManager.register(QueueName.RepeatQueue, repeatQueueProcessor);
+if (env.LANGFUSE_ENABLE_BACKGROUND_MIGRATIONS === "true") {
+  // Will start background migrations without blocking the queue workers
+  BackgroundMigrationManager.run().catch((err) => {
+    logger.error("Error running background migrations", err);
+  });
 }
 
 if (env.QUEUE_CONSUMER_TRACE_UPSERT_QUEUE_IS_ENABLED === "true") {
@@ -54,7 +59,7 @@ if (env.QUEUE_CONSUMER_EVAL_EXECUTION_QUEUE_IS_ENABLED === "true") {
     evalJobExecutorQueueProcessor,
     {
       concurrency: env.LANGFUSE_EVAL_EXECUTION_WORKER_CONCURRENCY,
-    },
+    }
   );
 }
 
@@ -84,7 +89,7 @@ if (
     cloudUsageMeteringQueueProcessor,
     {
       concurrency: 1,
-    },
+    }
   );
 }
 
@@ -92,7 +97,7 @@ if (env.QUEUE_CONSUMER_LEGACY_INGESTION_QUEUE_IS_ENABLED === "true") {
   WorkerManager.register(
     QueueName.LegacyIngestionQueue,
     legacyIngestionQueueProcessor,
-    { concurrency: env.LANGFUSE_LEGACY_INGESTION_WORKER_CONCURRENCY }, // n ingestion batches at a time
+    { concurrency: env.LANGFUSE_LEGACY_INGESTION_WORKER_CONCURRENCY } // n ingestion batches at a time
   );
 }
 
