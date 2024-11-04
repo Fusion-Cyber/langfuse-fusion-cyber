@@ -1,16 +1,45 @@
-import { TraceClickhouseRecord } from "../clickhouse/schema";
-import { queryClickhouse } from "./clickhouse";
+import {
+  parseClickhouseUTCDateTimeFormat,
+  queryClickhouse,
+} from "./clickhouse";
 import {
   createFilterFromFilterState,
   getProjectIdDefaultFilter,
 } from "../queries/clickhouse-filter/factory";
-import { ObservationLevel } from "@prisma/client";
+import { ObservationLevel, Trace } from "@prisma/client";
 import { FilterState } from "../../types";
 import { logger } from "../logger";
 import { FilterList } from "../queries/clickhouse-filter/clickhouse-filter";
+import { TraceRecordReadType } from "./definitions";
+import { tracesTableUiColumnDefinitions } from "../../tableDefinitions/mapTracesTable";
+import { TableCount } from "./types";
+import { OrderByState } from "../../interfaces/orderBy";
+import { orderByToClickhouseSql } from "../queries/clickhouse-filter/orderby-factory";
+
+const convertClickhouseToDomain = (record: TraceRecordReadType): Trace => {
+  return {
+    id: record.id,
+    projectId: record.project_id,
+    name: record.name ?? null,
+    timestamp: parseClickhouseUTCDateTimeFormat(record.timestamp),
+    tags: record.tags,
+    bookmarked: record.bookmarked,
+    release: record.release ?? null,
+    version: record.version ?? null,
+    userId: record.user_id ?? null,
+    sessionId: record.session_id ?? null,
+    public: record.public,
+    input: record.input ?? null,
+    output: record.output ?? null,
+    metadata: record.metadata,
+    createdAt: parseClickhouseUTCDateTimeFormat(record.created_at),
+    updatedAt: parseClickhouseUTCDateTimeFormat(record.updated_at),
+    externalId: null,
+  };
+};
 
 export type TracesTableReturnType = Pick<
-  TraceClickhouseRecord,
+  TraceRecordReadType,
   | "project_id"
   | "id"
   | "name"
@@ -26,24 +55,82 @@ export type TracesTableReturnType = Pick<
 > & {
   level: ObservationLevel;
   observation_count: number | null;
-  latency: number;
+  latency: string | null;
   usage_details: Record<string, number>;
   cost_details: Record<string, number>;
   scores_avg: Array<{ name: string; avg_value: number }>;
 };
 
+export const getTracesTableCount = async (
+  projectId: string,
+  filter: FilterState,
+  orderBy?: OrderByState,
+  limit?: number,
+  offset?: number,
+) =>
+  getTracesTableGeneric<TableCount>({
+    select: "count(*) as count",
+    projectId,
+    filter,
+    orderBy,
+    limit,
+    offset,
+  });
+
 export const getTracesTable = async (
   projectId: string,
   filter: FilterState,
+  orderBy?: OrderByState,
   limit?: number,
   offset?: number,
 ) => {
+  const rows = await getTracesTableGeneric<TracesTableReturnType>({
+    select: `
+    t.id, 
+    t.project_id, 
+    t.timestamp, 
+    t.tags, 
+    t.bookmarked, 
+    t.name, 
+    t.release, 
+    t.version, 
+    t.user_id, 
+    t.session_id,
+    os.latencyMs as latency,
+    os.cost_details as cost_details,
+    os.usage_details as usage_details,
+    os.level as level,
+    os.observation_count as observation_count,
+    s.scores_avg as scores_avg,
+    t.metadata,
+    t.public`,
+    projectId,
+    filter,
+    orderBy,
+    limit,
+    offset,
+  });
+
+  return rows;
+};
+
+type FetchTracesTableProps = {
+  select: string;
+  projectId: string;
+  filter: FilterState;
+  orderBy?: OrderByState;
+  limit?: number;
+  offset?: number;
+};
+
+const getTracesTableGeneric = async <T>(props: FetchTracesTableProps) => {
+  const { select, projectId, filter, orderBy, limit, offset } = props;
   logger.info(`input filter ${JSON.stringify(filter)}`);
   const { tracesFilter, scoresFilter, observationsFilter } =
     getProjectIdDefaultFilter(projectId, { tracesPrefix: "t" });
 
   tracesFilter.push(
-    ...createFilterFromFilterState(filter, { tracesPrefix: "t" }),
+    ...createFilterFromFilterState(filter, tracesTableUiColumnDefinitions),
   );
 
   const tracesFilterRes = tracesFilter.apply();
@@ -89,34 +176,17 @@ export const getTracesTable = async (
                           GROUP BY project_id,
                                   trace_id)
       select 
-        t.id, 
-        t.project_id, 
-        t.timestamp, 
-        t.tags, 
-        t.bookmarked, 
-        t.name, 
-        t.release, 
-        t.version, 
-        t.user_id, 
-        t.session_id,
-        os.latencyMs as latency,
-        os.cost_details as cost_details,
-        os.usage_details as usage_details,
-        os.level as level,
-        os.observation_count as observation_count,
-        s.scores_avg as scores_avg,
-        t.metadata,
-        t.public
+       ${select}
       from traces t final
               left join observations_stats os on os.project_id = t.project_id and os.trace_id = t.id
               left join scores_avg s on s.project_id = t.project_id and s.trace_id = t.id
 
       WHERE ${tracesFilterRes.query}
-      order by t.timestamp desc
-      ${limit && offset ? `limit {limit: Int32} offset {offset: Int32}` : ""}
+      ${orderByToClickhouseSql(orderBy ?? null, tracesTableUiColumnDefinitions)}
+      ${limit !== undefined && offset !== undefined ? `LIMIT {limit: Int32} OFFSET {offset: Int32}` : ""}
     `;
 
-  const rows = await queryClickhouse<TracesTableReturnType>({
+  return await queryClickhouse<T>({
     query: query,
     params: {
       limit: limit,
@@ -126,37 +196,26 @@ export const getTracesTable = async (
       ...scoresAvgFilterRes.params,
     },
   });
-
-  return rows;
 };
 
-export const getTraceById = async (traceId: string, projectId: string) => {
+export const getTraceByIdOrThrow = async (
+  traceId: string,
+  projectId: string,
+) => {
   const query = `SELECT * FROM traces where id = {traceId: String} and project_id = {projectId: String} order by event_ts desc LIMIT 1 by id, project_id`;
-  const records = await queryClickhouse<TraceClickhouseRecord>({
+  const records = await queryClickhouse<TraceRecordReadType>({
     query,
     params: { traceId, projectId },
   });
 
-  const res = records.map((record) => {
-    return {
-      id: record.id,
-      projectId: record.project_id,
-      name: record.name,
-      timestamp: new Date(record.timestamp),
-      tags: record.tags,
-      bookmarked: record.bookmarked,
-      release: record.release,
-      version: record.version,
-      userId: record.user_id,
-      sessionId: record.session_id,
-      public: record.public,
-      input: record.input,
-      output: record.output,
-      metadata: record.metadata,
-    };
-  });
+  const res = records.map(convertClickhouseToDomain);
 
-  return res.length ? res[0] : undefined;
+  if (res.length !== 1) {
+    const errorMessage = `Trace not found or multiple traces found for traceId: ${traceId}, projectId: ${projectId}`;
+    logger.error(errorMessage);
+    throw new Error(errorMessage);
+  }
+  return res[0] as Trace;
 };
 
 export const getTracesGroupedByName = async (
@@ -164,9 +223,10 @@ export const getTracesGroupedByName = async (
   timestampFilter?: FilterState,
 ) => {
   const chFilter = timestampFilter
-    ? createFilterFromFilterState(timestampFilter, {
-        tracesPrefix: "t",
-      })
+    ? createFilterFromFilterState(
+        timestampFilter,
+        tracesTableUiColumnDefinitions,
+      )
     : undefined;
 
   const timestampFilterRes = chFilter
@@ -178,7 +238,8 @@ export const getTracesGroupedByName = async (
         name as value
       from traces t final
       WHERE t.project_id = {projectId: String}
-      ${timestampFilterRes ? `AND ${timestampFilterRes.query}` : ""}
+      AND t.name IS NOT NULL
+      ${timestampFilterRes?.query ? `AND ${timestampFilterRes.query}` : ""}
       GROUP BY name
       ORDER BY name desc
       LIMIT 1000;
@@ -202,9 +263,10 @@ export const getTracesGroupedByTags = async (
   timestampFilter?: FilterState,
 ) => {
   const chFilter = timestampFilter
-    ? createFilterFromFilterState(timestampFilter, {
-        tracesPrefix: "t",
-      })
+    ? createFilterFromFilterState(
+        timestampFilter,
+        tracesTableUiColumnDefinitions,
+      )
     : undefined;
 
   const timestampFilterRes = chFilter
@@ -216,7 +278,7 @@ export const getTracesGroupedByTags = async (
         distinct(arrayJoin(tags)) as value
       from traces t final
       WHERE t.project_id = {projectId: String}
-      ${timestampFilterRes ? `AND ${timestampFilterRes.query}` : ""}
+      ${timestampFilterRes?.query ? `AND ${timestampFilterRes.query}` : ""}
       LIMIT 1000;
     `;
 

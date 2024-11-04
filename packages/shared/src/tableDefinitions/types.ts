@@ -1,7 +1,9 @@
 export type UiColumnMapping = {
   uiTableName: string;
+  uiTableId: string;
   clickhouseTableName: string;
-  clickhouseColumnName: string;
+  clickhouseSelect: string;
+  queryPrefix?: string;
 };
 
 export type OptionsDefinition = {

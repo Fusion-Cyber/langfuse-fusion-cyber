@@ -80,7 +80,7 @@ import { setUpSuperjson } from "@/src/utils/superjson";
 import { DB } from "@/src/server/db";
 import {
   addUserToSpan,
-  getTraceById,
+  getTraceByIdOrThrow,
   logger,
 } from "@langfuse/shared/src/server";
 import { isClickhouseEligible } from "@/src/server/utils/checkClickhouseAccess";
@@ -318,35 +318,45 @@ export const protectedOrganizationProcedure = withOtelTracingProcedure
 const inputTraceSchema = z.object({
   traceId: z.string(),
   projectId: z.string(),
-  queryClickhouse: z.boolean().nullable(),
+  queryClickhouse: z.boolean().nullish(),
 });
 
 const enforceTraceAccess = t.middleware(async ({ ctx, rawInput, next }) => {
   const result = inputTraceSchema.safeParse(rawInput);
 
-  if (!result.success)
+  if (!result.success) {
+    logger.error("Invalid input when parsing request body", result.error);
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: "Invalid input, traceId is required",
     });
+  }
 
   const traceId = result.data.traceId;
   const projectId = result.data.projectId;
 
   // if the user is eligible for clickhouse, and wants to use clickhouse, do so.
-  const trace =
+  let trace;
+
+  if (
     result.data.queryClickhouse === true &&
     isClickhouseEligible(ctx.session?.user)
-      ? await getTraceById(traceId, projectId)
-      : await prisma.trace.findFirst({
-          where: {
-            id: traceId,
-            projectId: projectId,
-          },
-          select: {
-            public: true,
-          },
-        });
+  ) {
+    logger.info(
+      `Querying Clickhouse for traceid: ${traceId} and project: ${projectId} `,
+    );
+    trace = await getTraceByIdOrThrow(traceId, projectId);
+  } else {
+    trace = await prisma.trace.findFirst({
+      where: {
+        id: traceId,
+        projectId: projectId,
+      },
+      select: {
+        public: true,
+      },
+    });
+  }
 
   if (!trace)
     throw new TRPCError({
