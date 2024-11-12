@@ -8,31 +8,49 @@ import { parseArgs } from "node:util";
 import { prisma, Prisma } from "@langfuse/shared/src/db";
 import { env } from "../env";
 
-async function addTemporaryColumnIfNotExists() {
-  const columnExists = await prisma.$queryRaw<{ column_exists: boolean }[]>(
-    Prisma.sql`
-      SELECT EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'observations'
-        AND column_name = 'tmp_migrated_to_clickhouse'
-      ) AS column_exists;
-    `,
-  );
-  if (!columnExists[0]?.column_exists) {
-    await prisma.$executeRaw`ALTER TABLE observations ADD COLUMN tmp_migrated_to_clickhouse BOOLEAN DEFAULT FALSE;`;
-    logger.info("Added temporary column tmp_migrated_to_clickhouse");
-  } else {
-    logger.info(
-      "Temporary column tmp_migrated_to_clickhouse already exists. Continuing...",
-    );
-  }
-}
+// This is hard-coded in our migrations and uniquely identifies the row in background_migrations table
+const backgroundMigrationId = "7526e7c9-0026-4595-af2c-369dfd9176ec";
 
 export default class MigrateObservationsFromPostgresToClickhouse
   implements IBackgroundMigration
 {
   private isAborted = false;
+  private isFinished = false;
+
+  private async updateMaxDate(stateSuffix: string, maxDate: Date) {
+    await prisma.$transaction(
+      async (tx) => {
+        // @ts-ignore
+        const migrationState: { state: Record<string, string> } =
+          await tx.backgroundMigration.findUniqueOrThrow({
+            where: { id: backgroundMigrationId },
+            select: { state: true },
+          });
+        migrationState.state[`maxDate${stateSuffix}`] = maxDate.toISOString();
+        await tx.backgroundMigration.update({
+          where: { id: backgroundMigrationId },
+          data: { state: migrationState.state },
+        });
+      },
+      {
+        maxWait: 5000,
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      },
+    );
+  }
+
+  private async getMaxDate(stateSuffix: string): Promise<Date | undefined> {
+    // @ts-ignore
+    const migrationState: { state: Record<string, string | undefined> } =
+      await prisma.backgroundMigration.findUniqueOrThrow({
+        where: { id: backgroundMigrationId },
+        select: { state: true },
+      });
+
+    return migrationState.state?.[`maxDate${stateSuffix}`]
+      ? new Date(migrationState.state[`maxDate${stateSuffix}`] as string)
+      : undefined;
+  }
 
   async validate(
     args: Record<string, unknown>,
@@ -52,15 +70,25 @@ export default class MigrateObservationsFromPostgresToClickhouse
       `Migrating observations from postgres to clickhouse with ${JSON.stringify(args)}`,
     );
 
+    const stateSuffix = (args.stateSuffix as string) ?? "";
+    const initialDate = await this.getMaxDate(stateSuffix);
     const maxRowsToProcess = Number(args.maxRowsToProcess ?? Infinity);
     const batchSize = Number(args.batchSize ?? 5000);
-    const maxDate = new Date((args.maxDate as string) ?? new Date());
+    const maxDate =
+      initialDate ?? new Date((args.maxDate as string) ?? new Date());
 
-    await addTemporaryColumnIfNotExists();
+    await this.updateMaxDate(stateSuffix, maxDate);
 
     let processedRows = 0;
-    while (!this.isAborted && processedRows < maxRowsToProcess) {
+    while (
+      !this.isAborted &&
+      !this.isFinished &&
+      processedRows < maxRowsToProcess
+    ) {
       const fetchStart = Date.now();
+
+      const maxDate = await this.getMaxDate(stateSuffix);
+      logger.info(`Max date: ${maxDate?.toISOString()}`);
 
       const observations = await prisma.$queryRaw<
         Array<Record<string, any>>
@@ -68,7 +96,7 @@ export default class MigrateObservationsFromPostgresToClickhouse
         SELECT o.id, o.trace_id, o.project_id, o.type, o.parent_observation_id, o.start_time, o.end_time, o.name, o.metadata, o.level, o.status_message, o.version, o.input, o.output, o.unit, o.model, o.internal_model_id, o."modelParameters" as model_parameters, o.prompt_tokens, o.completion_tokens, o.total_tokens, o.completion_start_time, o.prompt_id, p.name as prompt_name, p.version as prompt_version, o.input_cost, o.output_cost, o.total_cost, o.calculated_input_cost, o.calculated_output_cost, o.calculated_total_cost, o.created_at, o.updated_at
         FROM observations o
         LEFT JOIN prompts p ON o.prompt_id = p.id
-        WHERE o.tmp_migrated_to_clickhouse = FALSE AND o.created_at <= ${maxDate}
+        WHERE o.created_at <= ${maxDate}
         ORDER BY o.created_at DESC
         LIMIT ${batchSize};
       `);
@@ -92,14 +120,20 @@ export default class MigrateObservationsFromPostgresToClickhouse
         `Inserted ${observations.length} observations into Clickhouse in ${Date.now() - insertStart}ms`,
       );
 
-      await prisma.$executeRaw`
-        UPDATE observations
-        SET tmp_migrated_to_clickhouse = TRUE
-        WHERE id IN (${Prisma.join(observations.map((observation) => observation.id))});
-      `;
+      await this.updateMaxDate(
+        stateSuffix,
+        new Date(observations[observations.length - 1].created_at),
+      );
+
+      if (observations.length < batchSize) {
+        logger.info("No more observations to migrate. Exiting...");
+        this.isFinished = true;
+      }
 
       processedRows += observations.length;
-      logger.info(`Processed batch in ${Date.now() - fetchStart}ms`);
+      logger.info(
+        `Processed batch in ${Date.now() - fetchStart}ms. Oldest record in batch: ${new Date(observations[observations.length - 1].created_at).toISOString()}`,
+      );
     }
 
     if (this.isAborted) {
@@ -109,7 +143,6 @@ export default class MigrateObservationsFromPostgresToClickhouse
       return;
     }
 
-    await prisma.$executeRaw`ALTER TABLE observations DROP COLUMN IF EXISTS tmp_migrated_to_clickhouse;`;
     logger.info(
       `Finished migration of observations from Postgres to Clickhouse in ${Date.now() - start}ms`,
     );
@@ -133,6 +166,9 @@ async function main() {
         short: "d",
         default: new Date().toISOString(),
       },
+      // State prefix can be used to start multiple migrations at once.
+      // We add it to the end of the `maxDate` state key which makes the runs unique and restartable.
+      stateSuffix: { type: "string", short: "s", default: "" },
     },
   });
 
