@@ -16,7 +16,6 @@ import {
   getLatencyAndTotalCostForObservations,
   getLatencyAndTotalCostForObservationsByTraces,
   getObservationsById,
-  getScoresForObservations,
   getScoresForTraces,
   getTracesByIds,
   logger,
@@ -214,6 +213,7 @@ export const getDatasetRunsFromPostgres = async (
         d.id = ${input.datasetId}
         AND d.project_id = ${input.projectId}
       GROUP BY runs.id, runs.name, runs.description, runs.metadata, runs.created_at, runs.updated_at
+      ORDER BY runs.created_at DESC
       LIMIT ${input.limit}
       OFFSET ${input.page * input.limit}
     `,
@@ -501,42 +501,26 @@ export const getRunItemsByRunIdOrItemId = async (
   projectId: string,
   runItems: DatasetRunItems[],
 ) => {
-  const [
-    traceScores,
-    observationScores,
-    observationAggregates,
-    traceAggregate,
-  ] = await Promise.all([
-    getScoresForTraces(
-      projectId,
-      runItems
-        .filter((ri) => ri.observationId === null) // only include trace scores if run is not linked to an observation
-        .map((ri) => ri.traceId),
-    ),
-    getScoresForObservations(
-      projectId,
-      runItems
-        .filter((ri) => ri.observationId !== null)
-        .map((ri) => ri.observationId) as string[],
-    ),
-    getLatencyAndTotalCostForObservations(
-      projectId,
-      runItems
-        .filter((ri) => ri.observationId !== null)
-        .map((ri) => ri.observationId) as string[],
-    ),
-    getLatencyAndTotalCostForObservationsByTraces(
-      projectId,
-      runItems.map((ri) => ri.traceId),
-    ),
-  ]);
+  const [traceScores, observationAggregates, traceAggregate] =
+    await Promise.all([
+      getScoresForTraces(
+        projectId,
+        runItems.map((ri) => ri.traceId),
+      ),
+      getLatencyAndTotalCostForObservations(
+        projectId,
+        runItems
+          .filter((ri) => ri.observationId !== null)
+          .map((ri) => ri.observationId) as string[],
+      ),
+      getLatencyAndTotalCostForObservationsByTraces(
+        projectId,
+        runItems.map((ri) => ri.traceId),
+      ),
+    ]);
 
   const validatedTraceScores = filterAndValidateDbScoreList(
     traceScores,
-    traceException,
-  );
-  const validatedObservationScores = filterAndValidateDbScoreList(
-    observationScores,
     traceException,
   );
 
@@ -579,13 +563,7 @@ export const getRunItemsByRunIdOrItemId = async (
       observation,
       trace,
       scores: aggregateScores([
-        ...validatedTraceScores.filter(
-          (s) => s.traceId === ri.traceId && ri.observationId === null,
-        ),
-        ...validatedObservationScores.filter(
-          (s) =>
-            s.observationId === ri.observationId && s.traceId === ri.traceId,
-        ),
+        ...validatedTraceScores.filter((s) => s.traceId === ri.traceId),
       ]),
     };
   });
