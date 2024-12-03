@@ -33,19 +33,29 @@ import { z } from "zod";
 import { CloudConfigSchema } from "@langfuse/shared";
 import {
   CustomSSOProvider,
+  GitHubEnterpriseProvider,
   traceException,
   sendResetPasswordVerificationRequest,
   instrumentAsync,
   logger,
 } from "@langfuse/shared/src/server";
-import { getOrganizationPlan } from "@/src/features/entitlements/server/getOrganizationPlan";
+import {
+  getOrganizationPlanServerSide,
+  getSelfHostedInstancePlanServerSide,
+} from "@/src/features/entitlements/server/getPlan";
 import { projectRoleAccessRights } from "@/src/features/rbac/constants/projectAccessRights";
+import { hasEntitlementBasedOnPlan } from "@/src/features/entitlements/server/hasEntitlement";
 
 function canCreateOrganizations(userEmail: string | null): boolean {
-  // if no allowlist is set or no active EE key, allow all users to create organizations
+  const instancePlan = getSelfHostedInstancePlanServerSide();
+
+  // if no allowlist is set or no entitlement for self-host-allowed-organization-creators, allow all users to create organizations
   if (
     !env.LANGFUSE_ALLOWED_ORGANIZATION_CREATORS ||
-    !env.LANGFUSE_EE_LICENSE_KEY
+    !hasEntitlementBasedOnPlan({
+      plan: instancePlan,
+      entitlement: "self-host-allowed-organization-creators",
+    })
   )
     return true;
 
@@ -227,6 +237,22 @@ if (env.AUTH_GITHUB_CLIENT_ID && env.AUTH_GITHUB_CLIENT_SECRET)
     }),
   );
 
+if (
+    env.AUTH_GITHUB_ENTERPRISE_CLIENT_ID &&
+    env.AUTH_GITHUB_ENTERPRISE_CLIENT_SECRET &&
+    env.AUTH_GITHUB_ENTERPRISE_BASE_URL
+) {
+  staticProviders.push(
+      GitHubEnterpriseProvider({
+        clientId: env.AUTH_GITHUB_ENTERPRISE_CLIENT_ID,
+        clientSecret: env.AUTH_GITHUB_ENTERPRISE_CLIENT_SECRET,
+        enterprise: {baseUrl: env.AUTH_GITHUB_ENTERPRISE_BASE_URL},
+        allowDangerousEmailAccountLinking:
+            env.AUTH_GITHUB_ENTERPRISE_ALLOW_ACCOUNT_LINKING === "true",
+      })
+  );
+}
+
 if (env.AUTH_GITLAB_CLIENT_ID && env.AUTH_GITLAB_CLIENT_SECRET)
   staticProviders.push(
     GitLabProvider({
@@ -263,6 +289,7 @@ if (
       clientId: env.AUTH_COGNITO_CLIENT_ID,
       clientSecret: env.AUTH_COGNITO_CLIENT_SECRET,
       issuer: env.AUTH_COGNITO_ISSUER,
+      checks: "nonce",
       allowDangerousEmailAccountLinking:
         env.AUTH_COGNITO_ALLOW_ACCOUNT_LINKING === "true",
     }),
@@ -358,7 +385,7 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
                 env.LANGFUSE_DISABLE_EXPENSIVE_POSTGRES_QUERIES === "true",
               // Enables features that are only available under an enterprise license when self-hosting Langfuse
               // If you edit this line, you risk executing code that is not MIT licensed (self-contained in /ee folders otherwise)
-              eeEnabled: env.LANGFUSE_EE_LICENSE_KEY !== undefined,
+              selfHostedInstancePlan: getSelfHostedInstancePlanServerSide(),
             },
             user:
               dbUser !== null
@@ -404,7 +431,9 @@ export async function getAuthOptions(): Promise<NextAuthOptions> {
 
                           // Enables features/entitlements based on the plan of the organization, either cloud or EE version when self-hosting
                           // If you edit this line, you risk executing code that is not MIT licensed (contained in /ee folders, see LICENSE)
-                          plan: getOrganizationPlan(parsedCloudConfig.data),
+                          plan: getOrganizationPlanServerSide(
+                            parsedCloudConfig.data,
+                          ),
                         };
                       },
                     ),
